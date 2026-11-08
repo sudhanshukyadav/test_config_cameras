@@ -40,7 +40,24 @@ actually sends **2304x1296, 15 fps, GOP 90** (measured 2026-11-08).
 - Never commit passwords; the camera JSON is read from edge_worker or given on the command line.
 - Without `--test` the script works as before (PTZ keypad, preset moves); `--test` is non-interactive.
 
-## Usage
+## Config page (`web_ui.py`)
+
+```
+python C:\Users\sudha\camtest\web_ui.py            # then open http://127.0.0.1:8091
+```
+
+- Lists camera JSONs from the config dir (default `C:\Users\sudha\edge_worker`, read only, `--config-dir` to change) and from `out/`.
+- Every JSON key becomes an editable field (lists like resolution as `1920, 1080`), on one page, with a short
+  note on what it does; keys edge_worker's `multy.py` does not read are marked. Keys missing from a file
+  (e.g. `motion.exclude_zones`) are added from the template.
+- Motion exclude zones and the ROI can be drawn on the camera picture (red = exclude, blue = ROI). **Save to out/** writes the file;
+  **Run test** saves, runs `--test` on those values and shows the log, streams and issues; the JSON is reloaded with the measured values.
+- PTZ pad: hold a button or arrow key to move, release to stop (server stops any move after 4 s without a refresh).
+  Zoom, focus, speed, preset Go / Save here, autofocus, lens init, read position. Hidden when `ptz_protocol` is `none`.
+- Picture: one frame from the main or sub stream, refreshed after moves.
+- Listens on 127.0.0.1 only. Not yet: changing encoder settings on the camera itself.
+
+## Usage (command line)
 
 Run from the folder holding the camera JSONs (e.g. `C:\Users\sudha\edge_worker`):
 

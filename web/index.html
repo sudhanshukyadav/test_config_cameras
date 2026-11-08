@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera Config</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5e6875; --line: #dde1e6;
+  --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700;
+  --input: #ffffff; --code: #f0f2f5; --pad: #eef1f5; --pad-active: #cfe0fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #9aa4b2; --line: #2a3039;
+    --accent: #4c8dff; --accent-text: #0b0d10; --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+    --input: #0f1216; --code: #0f1216; --pad: #222831; --pad-active: #23406e;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .who { color: var(--muted); }
+header .spacer { flex: 1; }
+main { display: grid; grid-template-columns: 220px minmax(0, 1fr) 380px; gap: 12px; padding: 12px 16px; }
+@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+section.card + section.card { margin-top: 12px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+.cams button { display: block; width: 100%; text-align: left; margin: 0 0 4px; }
+.cams .grp { color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+.cams .grp:first-child { margin-top: 0; }
+.cams small { color: var(--muted); display: block; font-size: 11px; }
+button, select, input, textarea { font: inherit; color: var(--text); }
+button { background: var(--pad); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.sel { outline: 2px solid var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+input, select, textarea { background: var(--input); border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; width: 100%; min-width: 0; }
+input[type=checkbox] { width: auto; }
+fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; padding: 8px 12px 10px; }
+legend { font-weight: 600; padding: 0 6px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 14px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.field .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.field.unused label { opacity: .7; }
+.field.unused .hint { font-style: italic; }
+.issues { margin: 0; padding-left: 18px; }
+.issues li { color: var(--bad); }
+.okline { color: var(--ok); }
+pre.log { background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+  max-height: 320px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row > input[type=number] { width: 80px; }
+.pad { display: grid; grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(3, 48px); gap: 6px; justify-content: center; margin: 8px 0; }
+.pad button { font-size: 18px; padding: 0; touch-action: none; user-select: none; }
+.pad button.active { background: var(--pad-active); }
+.snap { width: 100%; aspect-ratio: 16 / 9; background: var(--code); border: 1px solid var(--line); border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; color: var(--muted); overflow: hidden; }
+.snap { position: relative; user-select: none; -webkit-user-select: none; }
+.snap img { pointer-events: none; -webkit-user-drag: none; }
+.snap img { width: 100%; height: 100%; object-fit: fill; display: block; }
+.snap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.snap.drawing canvas { cursor: crosshair; }
+.legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend b.z { color: #e5534b; } .legend b.r { color: #4c8dff; }
+.status { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
+.muted { color: var(--muted); }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 8px 14px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+#toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Camera Config</h1>
+  <span class="who" id="who">no camera loaded</span>
+  <span class="spacer"></span>
+  <label class="row muted">save as <input id="fname" style="width:160px" placeholder="gate.json"></label>
+  <button id="btnSave">Save to out/</button>
+  <label class="row muted">copy test <input id="copySec" type="number" value="10" min="0" max="60" style="width:64px"> s</label>
+  <button id="btnTest" class="primary">Run test</button>
+</header>
+
+<main>
+  <div>
+    <section class="card cams" id="cams"><h2>Cameras</h2></section>
+    <section class="card"><button id="btnNew">New camera</button>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Source files are read only. Saving and testing write to <code>out/</code>.</p></section>
+  </div>
+
+  <div>
+    <section class="card">
+      <h2>Test result</h2>
+      <div id="result" class="muted">Run a test to measure what the camera really sends.</div>
+      <pre class="log" id="log" hidden></pre>
+    </section>
+    <section class="card"><h2>Parameters</h2><form id="form" onsubmit="return false"></form></section>
+  </div>
+
+  <div>
+    <section class="card">
+      <h2>View</h2>
+      <div class="snap" id="snap">no picture</div>
+      <div class="row" style="margin-top:8px">
+        <select id="snapWhich" style="width:auto"><option value="sub">sub stream</option><option value="main">main stream</option></select>
+        <button id="btnSnap">Refresh picture</button>
+        <label class="row muted"><input type="checkbox" id="autoSnap" checked> after moves</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnDrawZone" title="Drag on the picture to add an area motion detection ignores">Draw exclude zone</button>
+        <button id="btnDrawRoi" title="Drag on the picture to set the only area watched (turns on use_roi)">Draw ROI</button>
+        <button id="btnClearZones">Clear zones</button>
+      </div>
+      <div class="legend"><b class="z">red</b> = exclude zones, <b class="r">blue</b> = ROI (when use_roi). Changes go into the motion fields; Save to keep them.</div>
+    </section>
+    <section class="card" id="ptzCard">
+      <h2>PTZ</h2>
+      <div id="ptzOff" class="muted" hidden>This camera has ptz_protocol "none". Change it in Parameters to use PTZ.</div>
+      <div id="ptzOn">
+        <div class="pad">
+          <span></span><button data-move="up" title="Tilt up (↑)">▲</button><span></span>
+          <button data-move="left" title="Pan left (←)">◀</button>
+          <button id="btnStop" title="Stop (space)">■</button>
+          <button data-move="right" title="Pan right (→)">▶</button>
+          <span></span><button data-move="down" title="Tilt down (↓)">▼</button><span></span>
+        </div>
+        <div class="row" style="justify-content:center">
+          <button data-move="zoom_in" title="Zoom in (+)">Zoom +</button>
+          <button data-move="zoom_out" title="Zoom out (-)">Zoom −</button>
+          <button data-move="focus_near">Focus near</button>
+          <button data-move="focus_far">Focus far</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <span class="muted">Speed</span>
+          <input type="range" id="speed" min="0.1" max="1" step="0.1" value="0.5" style="flex:1">
+          <span id="speedVal" class="status">0.5</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <span class="muted">Preset</span>
+          <input type="number" id="preset" min="1" max="255" value="1">
+          <button id="btnGoto">Go</button>
+          <button id="btnSetPreset" title="Save the current position as this preset">Save here</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="btnAF">Autofocus</button>
+          <button id="btnLens">Lens init</button>
+          <button id="btnStatus">Read position</button>
+        </div>
+        <div class="status" id="ptzStatus" style="margin-top:8px">hold a direction button or arrow key; release to stop</div>
+      </div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const CHOICES = {
+  vendor: ["dahua", "generic"], ptz_protocol: ["dahua_cgi", "onvif_soap", "none"],
+  rtsp_transport: ["tcp", "udp"], codec: ["H.264", "H.265"], bitrate_type: ["CBR", "VBR"],
+  day_night_mode: ["auto", "day", "night"], white_balance_mode: ["auto", "manual", "indoor", "outdoor"],
+};
+let current = null;   // {where, file, json, report}
+let TEMPLATE = null;  // default JSON from the server; missing keys are filled from it
+
+// What each key does. "*" = not read by edge_worker's multy.py (kept for reference / future use).
+const HINTS = {
+  "camera.name": "camera name in logs and folders",
+  "camera.vendor": "dahua = Dahua RTSP/CGI paths; generic = stream paths below",
+  "camera.ptz_protocol": "dahua_cgi, onvif_soap or none",
+  "camera.host": "camera IP address",
+  "camera.port": "RTSP port (usually 554)",
+  "camera.http_port": "web / CGI / ONVIF port (Dahua 80, cheap cameras often 8899)",
+  "camera.username": "camera login", "camera.password": "camera login",
+  "camera.channel": "Dahua channel (1 for a single camera)",
+  "camera.main_stream_subtype": "Dahua main stream (0)", "camera.sub_stream_subtype": "Dahua sub stream (1)",
+  "camera.main_stream_path": "RTSP path of the recorded stream, e.g. /live/ch0",
+  "camera.sub_stream_path": "RTSP path used for motion detection",
+  "camera.main_rtsp_url": "full RTSP URL; overrides the path", "camera.sub_rtsp_url": "full RTSP URL; overrides the path",
+  "camera.invert_stream": "picture is upside down (ceiling mount)",
+  "camera.ptz_markers": "* named PTZ positions",
+  "connection.rtsp_transport": "tcp is reliable; udp can lose packets",
+  "connection.buffer_size": "*",
+  "stream_encoder_properties.fps": "frames per second the camera sends (Run test measures it)",
+  "stream_encoder_properties.main_stream_resolution": "width, height of the main stream (measured)",
+  "stream_encoder_properties.sub_stream_resolution": "width, height of the sub stream (measured)",
+  "stream_encoder_properties.codec": "* must be H.264; multy only copies the stream",
+  "stream_encoder_properties.gop_keyframe_interval": "* frames between keyframes; best = fps (1 s)",
+  "stream_encoder_properties.smart_codec": "* keep off (H.264+ / smart codec breaks copy)",
+  "stream_encoder_properties.bitrate_type": "*", "stream_encoder_properties.bitrate_kbps": "*",
+  "motion.enabled": "false = camera is not started by multy",
+  "motion.motion_threshold_min": "size of the largest moving blob, in main-frame pixels, to count as motion (bigger = less sensitive)",
+  "motion.max_lighting_ratio": "ignore when more than this share of the frame changes (lights, IR switch), 0–1",
+  "motion.initial_snap_delay_sec": "wait this long after motion starts before the first snapshot",
+  "motion.post_roll_buffer_sec": "keep recording this long after motion stops",
+  "motion.cooldown_period_sec": "after an event, ignore new motion for this long",
+  "motion.draw_motion_box": "draw a box around the motion on snapshots",
+  "motion.exclude_zones": "areas to ignore: [[x1, y1, x2, y2], …] as 0–1 fractions. Draw them on the picture →",
+  "motion.use_roi": "only watch the roi_crop area",
+  "motion.roi_crop": "area to watch when use_roi: x1, y1, x2, y2 as 0–1 fractions. Draw it on the picture →",
+  "motion.heartbeat_interval_sec": "*", "motion.grid_rows": "*", "motion.grid_cols": "*",
+  "motion.diff_multiplier_threshold": "*", "motion.bg_scan_frame_step": "*",
+  "motion.min_sharpness": "*", "motion.min_brightness": "*", "motion.max_brightness": "*",
+};
+const SECTION_HINTS = {
+  sensor_hardware_properties: "* Picture settings on the camera. Not read by multy.py; not yet pushed to the camera.",
+  face_quality: "* Not read by multy.py.",
+};
+
+function withDefaults(json) {
+  const out = JSON.parse(JSON.stringify(json));
+  if (!TEMPLATE) return out;
+  for (const [sec, obj] of Object.entries(TEMPLATE)) {
+    if (!(sec in out)) { out[sec] = JSON.parse(JSON.stringify(obj)); continue; }
+    if (obj && typeof obj === "object" && !Array.isArray(obj))
+      for (const [k, v] of Object.entries(obj)) if (!(k in out[sec])) out[sec][k] = JSON.parse(JSON.stringify(v));
+  }
+  return out;
+}
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2600); }
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if ((r.headers.get("Content-Type") || "").startsWith("image/")) {
+    if (!r.ok) throw new Error("picture failed"); return r.blob();
+  }
+  const d = await r.json(); if (!r.ok) throw new Error(d.error || r.status); return d;
+}
+
+async function loadList(selectFile) {
+  const d = await api("/api/configs");
+  const box = $("cams"); box.innerHTML = "<h2>Cameras</h2>";
+  for (const where of ["source", "out"]) {
+    const g = document.createElement("div"); g.className = "grp";
+    g.textContent = where === "source" ? "Source: " + d.config_dir : "Generated / saved: out/";
+    box.appendChild(g);
+    const items = d.items.filter(i => i.where === where);
+    if (!items.length) { const m = document.createElement("div"); m.className = "muted"; m.textContent = "none"; box.appendChild(m); }
+    for (const it of items) {
+      const b = document.createElement("button");
+      b.innerHTML = `${esc(it.name)}<small>${esc(it.file)} · ${esc(it.host || "")}</small>`;
+      if (current && current.where === where && current.file === it.file) b.classList.add("sel");
+      b.onclick = () => openConfig(where, it.file);
+      box.appendChild(b);
+    }
+  }
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function openConfig(where, file) {
+  const d = await api(`/api/config?where=${where}&file=${encodeURIComponent(file)}`);
+  setCurrent({ where, file, json: d.json, report: d.report });
+}
+
+function setCurrent(c) {
+  c.json = withDefaults(c.json);
+  current = c;
+  $("fname").value = c.file;
+  const cam = c.json.camera || {};
+  $("who").textContent = `${cam.name || "?"} · ${cam.host || "no host"} · ${c.where === "out" ? "out/" : "source"} ${c.file}`;
+  buildForm(c.json, c.report);
+  showReport(c.report);
+  updatePtzPanel();
+  $("snap").textContent = "no picture"; stopAll(false);
+  loadList();
+  if (cam.host) refreshSnap();
+}
+
+// ---- parameter form, generated from the JSON so new keys show up automatically
+function buildForm(json, report) {
+  const form = $("form"); form.innerHTML = "";
+  for (const [sec, obj] of Object.entries(json)) {
+    const fs = document.createElement("fieldset"); fs.dataset.section = sec;
+    fs.innerHTML = `<legend>${esc(sec)}</legend>` +
+      (SECTION_HINTS[sec] ? `<div class="muted" style="font-size:12px;margin-bottom:6px">${esc(SECTION_HINTS[sec])}</div>` : "");
+    const grid = document.createElement("div"); grid.className = "grid"; fs.appendChild(grid);
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+      grid.appendChild(fieldFor(sec, "", obj)); form.appendChild(fs); continue;
+    }
+    for (const [k, v] of Object.entries(obj)) grid.appendChild(fieldFor(sec, k, v));
+    form.appendChild(fs);
+  }
+}
+
+function fieldFor(sec, key, v) {
+  const wrap = document.createElement("div"); wrap.className = "field";
+  const id = `f_${sec}_${key}`;
+  wrap.innerHTML = `<label for="${esc(id)}">${esc(key || sec)}</label>`;
+  let el;
+  if (typeof v === "boolean") {
+    el = document.createElement("input"); el.type = "checkbox"; el.checked = v; el.dataset.type = "bool";
+  } else if (typeof v === "number") {
+    el = document.createElement("input"); el.type = "number"; el.step = "any"; el.value = v; el.dataset.type = "num";
+  } else if (typeof v === "string" && CHOICES[key]) {
+    el = document.createElement("select"); el.dataset.type = "str";
+    const opts = CHOICES[key].includes(v) ? CHOICES[key] : [v, ...CHOICES[key]];
+    el.innerHTML = opts.map(o => `<option${o === v ? " selected" : ""}>${esc(o)}</option>`).join("");
+  } else if (typeof v === "string") {
+    el = document.createElement("input"); el.type = key === "password" ? "password" : "text"; el.value = v; el.dataset.type = "str";
+    if (key === "password") el.autocomplete = "off";
+  } else if (Array.isArray(v) && key !== "exclude_zones" && v.every(x => typeof x === "number")) {
+    el = document.createElement("input"); el.type = "text"; el.value = v.join(", "); el.dataset.type = "numlist";
+  } else {
+    el = document.createElement("textarea"); el.rows = 2; el.value = JSON.stringify(v); el.dataset.type = "json";
+  }
+  el.id = id; el.dataset.section = sec; el.dataset.key = key;
+  wrap.appendChild(el);
+  const hint = HINTS[`${sec}.${key}`];
+  if (hint) {
+    const h = document.createElement("div"); h.className = "hint";
+    h.textContent = hint === "*" ? "not read by multy.py" : hint.replace(/^\* /, "not read by multy.py: ");
+    if (hint.startsWith("*")) wrap.classList.add("unused");
+    wrap.appendChild(h);
+  }
+  if (sec === "motion" && (key === "exclude_zones" || key === "roi_crop" || key === "use_roi"))
+    el.addEventListener("change", drawOverlay);
+  return wrap;
+}
+
+function readForm() {
+  const out = JSON.parse(JSON.stringify(current.json));
+  for (const el of $("form").querySelectorAll("[data-section]:not(fieldset)")) {
+    const { section, key, type } = el.dataset;
+    let v;
+    if (type === "bool") v = el.checked;
+    else if (type === "num") { v = el.value === "" ? null : Number(el.value); if (Number.isNaN(v)) throw new Error(`${section}.${key} is not a number`); }
+    else if (type === "numlist") v = el.value.split(",").map(s => s.trim()).filter(Boolean).map(Number);
+    else if (type === "json") { try { v = JSON.parse(el.value); } catch { throw new Error(`${section}.${key} is not valid JSON`); } }
+    else v = el.value;
+    if (key === "") out[section] = v; else out[section][key] = v;
+  }
+  return out;
+}
+
+function showReport(rep) {
+  const box = $("result");
+  if (!rep) { box.className = "muted"; box.textContent = "No test yet for this file. Run a test to measure what the camera really sends."; return; }
+  box.className = "";
+  const s = (rep.streams || []).map(x => `${x.path}: ${x.width}x${x.height} ${x.codec} ${x.fps} fps, keyframe every ${x.gop ?? "?"}`);
+  const c = rep.copy_test ? `copy test ${rep.copy_test.ok ? "OK" : "FAIL"} ${rep.copy_test.duration}s, ${rep.copy_test.keyframes} keyframes` : "no copy test";
+  const issues = rep.issues || [];
+  box.innerHTML = `<div class="muted">tested ${esc(rep.time || "")}</div>` +
+    `<div>${s.map(esc).join("<br>") || "no streams"}</div><div>${esc(c)}</div>` +
+    (issues.length ? `<ul class="issues">${issues.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`
+                   : `<div class="okline">Ready for edge_worker: no issues.</div>`);
+}
+
+$("btnSave").onclick = async () => {
+  if (!current) return toast("Load a camera first");
+  try { const json = readForm(); const file = $("fname").value.trim();
+    const d = await api("/api/save", { file, json });
+    current = { ...current, where: "out", file, json }; toast("Saved " + d.saved); loadList();
+  } catch (e) { toast(e.message); }
+};
+
+$("btnTest").onclick = async () => {
+  if (!current) return toast("Load a camera first");
+  let json; try { json = readForm(); } catch (e) { return toast(e.message); }
+  const file = $("fname").value.trim();
+  const b = $("btnTest"); b.disabled = true; b.textContent = "Testing…";
+  $("log").hidden = false; $("log").textContent = "running (about 30–60 s)…";
+  try {
+    const d = await api("/api/test", { file, json, copy_seconds: Number($("copySec").value) || 0 });
+    $("log").textContent = d.log;
+    if (d.json) setCurrent({ where: "out", file, json: d.json, report: d.report });
+    $("log").hidden = false; $("log").textContent = d.log;
+    toast(d.code === 0 ? "Test passed" : d.code === 2 ? "Test done, issues found" : "Test failed");
+  } catch (e) { $("log").textContent = e.message; }
+  b.disabled = false; b.textContent = "Run test";
+};
+
+$("btnNew").onclick = async () => {
+  const name = prompt("Camera name (also the file name):"); if (!name) return;
+  const d = await api("/api/template"); const json = JSON.parse(JSON.stringify(d.json));
+  json.camera.name = name;
+  setCurrent({ where: "out", file: name.toLowerCase().replace(/[^a-z0-9_-]/g, "_") + ".json", json, report: null });
+};
+
+// ---- PTZ
+function camNow() { try { return readForm().camera; } catch { return current.json.camera; } }
+function updatePtzPanel() {
+  const off = !current || (current.json.camera || {}).ptz_protocol === "none";
+  $("ptzOff").hidden = !off; $("ptzOn").hidden = off;
+}
+$("form").addEventListener("change", (e) => { if (e.target.dataset.key === "ptz_protocol") updatePtzPanel(); });
+
+async function ptz(action, extra = {}) {
+  if (!current) return;
+  try {
+    const d = await api("/api/ptz", { camera: camNow(), action, speed: Number($("speed").value), ...extra });
+    if (d.status) { const p = d.status; $("ptzStatus").textContent = `pan ${p.x.toFixed(2)}  tilt ${p.y.toFixed(2)}  zoom ${p.z.toFixed(2)}  focus ${p.focus}${d.moving ? "  MOVING" : ""}`; }
+    else $("ptzStatus").textContent = `${action} ${d.ok ? "OK" : "FAIL" + (d.error ? " " + d.error : "")}`;
+    return d;
+  } catch (e) { $("ptzStatus").textContent = `${action} error: ${e.message}`; }
+}
+
+let moving = null;
+function startMove(dir, btn) {
+  if (moving === dir) return;
+  moving = dir; document.querySelectorAll(".active").forEach(b => b.classList.remove("active"));
+  if (btn) btn.classList.add("active");
+  ptz(dir);
+  // keep the server's 4 s safety stop from firing while the button is held
+  clearInterval(startMove.k); startMove.k = setInterval(() => moving && ptz(moving), 3000);
+}
+function stopAll(send = true) {
+  clearInterval(startMove.k);
+  document.querySelectorAll(".active").forEach(b => b.classList.remove("active"));
+  const was = moving; moving = null;
+  if (send && was) ptz("stop").then(() => $("autoSnap").checked && setTimeout(refreshSnap, 600));
+}
+for (const b of document.querySelectorAll("[data-move]")) {
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); b.setPointerCapture(e.pointerId); startMove(b.dataset.move, b); });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(ev, () => stopAll());
+}
+$("btnStop").onclick = () => { moving = moving || "x"; stopAll(); };
+const KEYS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", "+": "zoom_in", "=": "zoom_in", "-": "zoom_out" };
+document.addEventListener("keydown", (e) => {
+  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || $("ptzOn").hidden || !current) return;
+  if (KEYS[e.key]) { e.preventDefault(); startMove(KEYS[e.key], document.querySelector(`[data-move="${KEYS[e.key]}"]`)); }
+  else if (e.key === " ") { e.preventDefault(); moving = moving || "x"; stopAll(); }
+});
+document.addEventListener("keyup", (e) => { if (KEYS[e.key] && moving === KEYS[e.key]) stopAll(); });
+window.addEventListener("blur", () => stopAll());
+
+$("speed").oninput = () => $("speedVal").textContent = $("speed").value;
+$("btnGoto").onclick = async () => { $("ptzStatus").textContent = "moving to preset…";
+  const d = await ptz("goto", { preset: Number($("preset").value) }); if (d && d.ok && $("autoSnap").checked) refreshSnap(); };
+$("btnSetPreset").onclick = () => { if (confirm(`Overwrite preset ${$("preset").value} with the current position?`)) ptz("set_preset", { preset: Number($("preset").value) }); };
+$("btnAF").onclick = () => ptz("autofocus");
+$("btnLens").onclick = () => ptz("lens_init");
+$("btnStatus").onclick = () => ptz("status");
+
+// ---- picture
+async function refreshSnap() {
+  if (!current) return;
+  const box = $("snap"); if (!box.querySelector("img")) box.textContent = "loading…";
+  try {
+    const blob = await api("/api/snapshot", { camera: camNow(), which: $("snapWhich").value });
+    const url = URL.createObjectURL(blob);
+    const img = new Image(); img.alt = "camera picture";
+    img.onload = () => {
+      box.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      box.innerHTML = ""; box.appendChild(img);
+      const cv = document.createElement("canvas"); box.appendChild(cv); hookCanvas(cv); drawOverlay();
+    };
+    img.src = url;
+  } catch (e) { box.textContent = "no picture: " + e.message; }
+}
+
+// ---- exclude zones / ROI drawn on the picture (fractions 0..1 of the frame, like multy.py)
+let drawMode = null, dragStart = null, dragNow = null;
+const fld = (k) => document.getElementById(`f_motion_${k}`);
+function zonesNow() { try { const z = JSON.parse(fld("exclude_zones").value || "[]"); return Array.isArray(z) ? z : []; } catch { return []; } }
+function roiNow() { const v = (fld("roi_crop")?.value || "").split(",").map(Number); return v.length === 4 && v.every(n => !isNaN(n)) ? v : null; }
+function drawOverlay() {
+  const cv = document.querySelector(".snap canvas"); if (!cv || !current) return;
+  const w = cv.width = cv.clientWidth, h = cv.height = cv.clientHeight, g = cv.getContext("2d");
+  g.clearRect(0, 0, w, h); g.lineWidth = 2;
+  const rect = (r, stroke, fill) => { const [x1, y1, x2, y2] = r;
+    g.fillStyle = fill; g.strokeStyle = stroke;
+    g.fillRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h); g.strokeRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h); };
+  if (fld("use_roi")?.checked && roiNow()) rect(roiNow(), "#4c8dff", "rgba(76,141,255,.10)");
+  zonesNow().forEach(z => Array.isArray(z) && z.length === 4 && rect(z, "#e5534b", "rgba(229,83,75,.28)"));
+  if (dragStart && dragNow) rect(norm(dragStart, dragNow), drawMode === "roi" ? "#4c8dff" : "#e5534b", "rgba(255,255,255,.15)");
+}
+const r3 = (n) => Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000;
+function norm(a, b) { return [r3(Math.min(a[0], b[0])), r3(Math.min(a[1], b[1])), r3(Math.max(a[0], b[0])), r3(Math.max(a[1], b[1]))]; }
+function hookCanvas(cv) {
+  const pos = (e) => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) / b.width, (e.clientY - b.top) / b.height]; };
+  cv.addEventListener("pointerdown", (e) => {
+    if (!drawMode) return; e.preventDefault(); cv.setPointerCapture(e.pointerId); dragStart = dragNow = pos(e); });
+  cv.addEventListener("pointermove", (e) => { if (dragStart) { e.preventDefault(); dragNow = pos(e); drawOverlay(); } });
+  const finish = (e) => {
+    if (!dragStart) return; const r = norm(dragStart, e.type === "pointerup" ? pos(e) : dragNow); dragStart = dragNow = null;
+    if (r[2] - r[0] > 0.01 && r[3] - r[1] > 0.01) {
+      if (drawMode === "roi") { fld("roi_crop").value = r.join(", "); fld("use_roi").checked = true; }
+      else { const z = zonesNow(); z.push(r); fld("exclude_zones").value = JSON.stringify(z); }
+    }
+    setDrawMode(null); drawOverlay();
+  };
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) cv.addEventListener(ev, finish);
+}
+function setDrawMode(m) {
+  drawMode = m; document.querySelector(".snap").classList.toggle("drawing", !!m);
+  $("btnDrawZone").classList.toggle("sel", m === "zone"); $("btnDrawRoi").classList.toggle("sel", m === "roi");
+}
+$("btnDrawZone").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "zone" ? null : "zone"); };
+$("btnDrawRoi").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "roi" ? null : "roi"); };
+$("btnClearZones").onclick = () => { if (!current) return; fld("exclude_zones").value = "[]"; fld("use_roi").checked = false; drawOverlay(); };
+window.addEventListener("resize", drawOverlay);
+$("btnSnap").onclick = refreshSnap;
+$("snapWhich").onchange = refreshSnap;
+
+api("/api/template").then(d => { TEMPLATE = d.json; }).catch(() => {}).finally(() => loadList().catch(e => toast(e.message)));
+</script>
+</body>
+</html>
