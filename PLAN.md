@@ -40,6 +40,25 @@ actually sends **2304x1296, 15 fps, GOP 90** (measured 2026-11-08).
 - Never commit passwords; the camera JSON is read from edge_worker or given on the command line.
 - Without `--test` the script works as before (PTZ keypad, preset moves); `--test` is non-interactive.
 
+## Unknown cameras (`discover.py`)
+
+```
+python discover.py                                        # list cameras on this PC's network
+python discover.py --identify 192.168.8.40 --user admin --password xxx --write
+```
+
+1. Find: ONVIF WS-Discovery (multicast, on the right network card) plus a TCP scan of the /24 for
+   camera ports (554, 80, 8899, 8000, 8080, 2020, 34567, 37777). Hosts without ONVIF need RTSP open.
+2. Identify: ONVIF maker / model / PTZ service / profiles (codec, size, fps) and each stream's RTSP
+   address from GetStreamUri; Dahua CGI check (Dahua OEM cameras call themselves "General");
+   without ONVIF, a short list of maker RTSP paths (Dahua, Hikvision, generic).
+3. Logins tried: the one you give, plus no login. Nothing is guessed.
+4. Writes a starting JSON; then run the camera test, which measures what the camera really sends.
+   The camera test itself now also asks ONVIF for stream addresses.
+
+Found this way (2026-11-08): livingroom and apcam (NVT JA-A1A) have a real sub stream,
+`/live/ch00_1` 640x360 H.264; the edge_worker JSONs use `/live/ch0` for both main and sub.
+
 ## Config page (`web_ui.py`)
 
 ```

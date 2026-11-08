@@ -636,13 +636,41 @@ def ffprobe_stream(url: str, seconds: int = 13, timeout: int = 30):
             "frames_read": len(d.get("frames", []))}, None
 
 
+def onvif_stream_paths(cfg: dict) -> list:
+    """RTSP paths the camera itself reports over ONVIF (GetProfiles + GetStreamUri). [] if no ONVIF."""
+    try:
+        drv = ONVIFSoapDriver({**cfg, "ptz_protocol": "onvif_soap"})
+    except Exception:
+        return []
+    if not drv.auth_ok:
+        return []
+    res = drv._post_soap("<trt:GetProfiles/>", service="media")
+    tokens = re.findall(r'<[\w]*:?Profiles[^>]*token="([^"]+)"', res.text) if res is not None else []
+    paths = []
+    for tok in tokens:
+        body = ("<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream>"
+                "<tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>"
+                f"<trt:ProfileToken>{tok}</trt:ProfileToken></trt:GetStreamUri>")
+        r = drv._post_soap(body, service="media")
+        m = re.search(r"<[\w]*:?Uri>([^<]+)<", r.text) if r is not None else None
+        if m:
+            u = urllib.parse.urlparse(m.group(1).replace("&amp;", "&"))
+            p = u.path + (f"?{u.query}" if u.query else "")
+            if p not in paths:
+                paths.append(p)
+    return paths
+
+
 def stream_candidates(cfg: dict, raw_cam: dict, extended: bool = False):
     """(label, path, dahua_subtype) tuples to try. Cheap cameras stop answering for a while
     after several bad paths, so the long generic list is only used when nothing else worked."""
     ch = cfg.get("channel", 1)
     if cfg["vendor"] == "dahua" or cfg["ptz_protocol"] == "dahua_cgi":
         return [(f"subtype{st}", f"/cam/realmonitor?channel={ch}&subtype={st}", st) for st in (0, 1, 2)]
-    paths = [raw_cam.get("main_stream_path"), raw_cam.get("sub_stream_path")] +         (GENERIC_RTSP_PATHS if extended else ["/live/ch0", "/live/ch1"])
+    # Configured paths first, then what the camera reports over ONVIF, then common guesses.
+    onvif = [] if extended else onvif_stream_paths(cfg)
+    paths = [raw_cam.get("main_stream_path"), raw_cam.get("sub_stream_path")] + onvif + \
+        (GENERIC_RTSP_PATHS if extended else ["/live/ch0", "/live/ch1"])
     seen, out = set(), []
     for p in paths:
         if p and p not in seen:
@@ -655,7 +683,9 @@ def test_streams(cfg: dict, raw_cam: dict, report: dict):
     name = cfg["name"]
     found = []
     candidates = stream_candidates(cfg, raw_cam)
-    for label, path, subtype in candidates:
+    for i, (label, path, subtype) in enumerate(candidates):
+        if i:
+            time.sleep(1)   # cheap cameras keep a closed stream counted for a moment
         info, err = ffprobe_stream(rtsp_url(cfg, path))
         if not info:
             log(name, f"stream {label} none ({mask(err, cfg).split(': ')[-1]})")

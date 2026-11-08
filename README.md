@@ -5,3 +5,4 @@ Starting point: `test_protocol.py`. Tests a camera, then writes the complete cam
 that edge_worker uses. See [PLAN.md](PLAN.md).
 
 Config page with PTZ: `python web_ui.py`, then open http://127.0.0.1:8091.
+Find and identify unknown cameras: `python discover.py`, or Discover on the page.

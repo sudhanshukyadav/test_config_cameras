@@ -89,6 +89,18 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 <main>
   <div>
     <section class="card cams" id="cams"><h2>Cameras</h2></section>
+    <section class="card">
+      <h2>Find cameras</h2>
+      <input id="discSubnet" placeholder="subnet, e.g. 192.168.8.0/24 (blank = this PC's)">
+      <div class="row" style="margin-top:6px">
+        <input id="discUser" placeholder="login" autocomplete="off" style="flex:1">
+        <input id="discPass" type="password" placeholder="password" autocomplete="off" style="flex:1">
+      </div>
+      <label class="row muted" style="margin-top:6px"><input type="checkbox" id="discScan" checked> also scan ports (finds non-ONVIF cameras)</label>
+      <button id="btnDiscover" class="primary" style="margin-top:6px;width:100%">Discover</button>
+      <div id="discList" class="cams" style="margin-top:8px"></div>
+      <p class="muted" style="font-size:12px;margin:6px 0 0">Only this login and no login are tried. Click a camera to identify it and open a new JSON; then Run test.</p>
+    </section>
     <section class="card"><button id="btnNew">New camera</button>
       <p class="muted" style="font-size:12px;margin:8px 0 0">Source files are read only. Saving and testing write to <code>out/</code>.</p></section>
   </div>
@@ -383,6 +395,44 @@ $("btnNew").onclick = async () => {
   json.camera.name = name;
   setCurrent({ where: "out", file: name.toLowerCase().replace(/[^a-z0-9_-]/g, "_") + ".json", json, report: null });
 };
+
+// ---- Find and identify unknown cameras
+$("btnDiscover").onclick = async () => {
+  const b = $("btnDiscover"), list = $("discList");
+  b.disabled = true; b.textContent = "Searching…"; list.innerHTML = "";
+  try {
+    const d = await api("/api/discover", { subnet: $("discSubnet").value.trim(), scan: $("discScan").checked });
+    if (!d.devices.length) list.innerHTML = `<div class="muted">No cameras found on ${esc(d.subnet)}.</div>`;
+    for (const dev of d.devices) {
+      const btn = document.createElement("button");
+      const what = [dev.name, dev.hardware].filter(Boolean).join(" ") || (dev.onvif_xaddrs.length ? "ONVIF" : "RTSP only");
+      btn.innerHTML = `${esc(dev.ip)} <span class="muted">${esc(what)}</span>` +
+        `<small>ports ${esc(dev.ports.join(", ") || "?")}${dev.known ? " · already in " + esc(dev.known) : " · new"}</small>`;
+      btn.onclick = () => identifyCam(dev, btn);
+      list.appendChild(btn);
+    }
+  } catch (e) { list.textContent = e.message; }
+  b.disabled = false; b.textContent = "Discover";
+};
+
+async function identifyCam(dev, btn) {
+  const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = `${esc(dev.ip)} <small>identifying… (up to 30 s)</small>`;
+  try {
+    const d = await api("/api/identify", { ip: dev.ip, ports: dev.ports, onvif_xaddrs: dev.onvif_xaddrs,
+                                            username: $("discUser").value, password: $("discPass").value });
+    const i = d.identify;
+    const file = i.name + ".json";
+    setCurrent({ where: "out", file, json: d.json, report: null });
+    const streams = i.streams.map(s => `${s.path} ${s.width ?? "?"}x${s.height ?? "?"} ${s.encoding ?? ""}`);
+    $("result").className = "";
+    $("result").innerHTML = `<div><b>${esc(i.maker || "?")} ${esc(i.model || "")}</b> · vendor ${esc(i.vendor)} · PTZ ${esc(i.ptz_protocol)}` +
+      ` · ONVIF ${i.onvif_port ? "port " + i.onvif_port + " (login " + esc(i.onvif_login) + ")" : "no"}</div>` +
+      `<div>${streams.map(esc).join("<br>") || "no streams found"}</div>` +
+      (i.notes.length ? `<ul class="issues">${i.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : "") +
+      `<div class="muted">New JSON opened as ${esc(file)} (not saved). Check the name, then Run test to measure the streams.</div>`;
+  } catch (e) { toast(e.message); }
+  btn.disabled = false; btn.innerHTML = old;
+}
 
 // ---- PTZ
 function camNow() { try { return readForm().camera; } catch { return current.json.camera; } }

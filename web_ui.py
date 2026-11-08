@@ -17,6 +17,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import discover as dc
 import test_protocol as tp
 
 WEB_DIR = os.path.join(tp.SCRIPT_DIR, "web")
@@ -240,6 +241,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, run_test(b["file"], b["json"], b.get("copy_seconds", 10)))
             if u.path == "/api/ptz":
                 return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset")))
+            if u.path == "/api/discover":
+                devices = dc.discover(b.get("subnet") or None, scan=b.get("scan", True))
+                known = {i["host"]: i for i in list_configs()}
+                for d in devices:
+                    k = known.get(d["ip"])
+                    d["known"] = f"{k['where']}/{k['file']}" if k else None
+                return self._send(200, {"subnet": b.get("subnet") or dc.default_subnet(), "devices": devices})
+            if u.path == "/api/identify":
+                ident = dc.identify(b["ip"], b.get("username", ""), b.get("password", ""),
+                                    b.get("ports") or [], b.get("onvif_xaddrs") or [], None)
+                return self._send(200, {"identify": ident,
+                                        "json": dc.to_camera_json(ident, b.get("username", ""), b.get("password", ""))})
             if u.path == "/api/snapshot":
                 return self._send(200, snapshot(b["camera"], b.get("which", "sub"), b.get("encoder")), "image/jpeg")
             return self._send(404, {"error": "not found"})
