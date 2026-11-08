@@ -441,7 +441,11 @@ $("btnStatus").onclick = () => ptz("status");
 
 // ---- picture
 async function refreshSnap() {
-  if (!current) return;
+  if (!current || refreshSnap.busy) return;   // one picture request at a time
+  refreshSnap.busy = true;
+  try { await loadSnap(); } finally { refreshSnap.busy = false; }
+}
+async function loadSnap() {
   const box = $("snap"); if (!box.querySelector("img")) box.textContent = "loading…";
   try {
     let encoder = {}; try { encoder = readForm().stream_encoder_properties || {}; } catch {}

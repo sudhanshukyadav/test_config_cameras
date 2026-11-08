@@ -26,6 +26,7 @@ _test_lock = threading.Lock()      # one camera test at a time (stdout is captur
 _drivers = {}                      # (host, http_port, user, password, protocol) -> driver
 _drivers_lock = threading.Lock()
 _watchdogs = {}                    # driver id -> Timer that stops a move nobody stopped
+_snap_locks = {}                   # camera host -> Lock (one picture stream per camera at a time)
 
 
 def list_configs():
@@ -162,9 +163,24 @@ def snapshot(cam, which, encoder=None):
     cmd = ["ffmpeg", "-v", "error", "-y", "-rtsp_transport", "tcp", "-timeout", "5000000",
            "-i", tp.rtsp_url(cfg, path), "-t", f"{read_s:.1f}", "-an", "-vf", "scale='min(1280,iw)':-2",
            "-update", "1", "-q:v", "4", tmp]
-    r = subprocess.run(cmd, capture_output=True, timeout=30)
-    if not os.path.isfile(tmp):
-        raise RuntimeError(tp.mask(r.stderr.decode(errors="ignore").strip()[-200:], cfg) or "no frame")
+    # Cheap cameras allow ~3 RTSP streams and keep a closed one counted for a few seconds.
+    # multy.py already holds one, so: one picture per camera at a time, and retry when refused.
+    with _snap_locks.setdefault(cfg["host"], threading.Lock()):
+        err = ""
+        for attempt in range(3):
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+            r = subprocess.run(cmd, capture_output=True, timeout=30)
+            if os.path.isfile(tmp):
+                break
+            err = tp.mask(r.stderr.decode(errors="ignore").strip(), cfg)
+            tp.log(cfg["name"], f"picture refused (try {attempt + 1}/3): {err.splitlines()[-1][-80:] if err else '?'}")
+            time.sleep(3)
+        else:
+            if "Invalid data" in err or "4XX" in err or "503" in err:
+                raise RuntimeError("camera refused the stream 3 times. It allows only a few streams at once "
+                                   "(multy.py uses one, a running test uses more). Wait a few seconds and refresh.")
+            raise RuntimeError(err.splitlines()[-1][-200:] if err else "no frame")
     with open(tmp, "rb") as f:
         data = f.read()
     os.remove(tmp)
