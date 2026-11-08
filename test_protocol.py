@@ -1,0 +1,699 @@
+#!/usr/bin/env python3
+"""Unified Diagnostic Probe & PTZ Control Suite for Multi-Camera Setups."""
+
+import argparse
+import base64
+import datetime
+import glob
+import hashlib
+import json
+import os
+import re
+import select
+import socket
+import subprocess
+import sys
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+import requests
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+
+# Cross-platform non-blocking key reader
+if sys.platform.startswith("win"):
+    import msvcrt
+
+    def get_key(timeout=0.05):
+        start = time.time()
+        while time.time() - start < timeout:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b"\x00", b"\xe0"):
+                    ch2 = msvcrt.getch()
+                    arrow_map = {b"H": "UP", b"P": "DOWN", b"K": "LEFT", b"M": "RIGHT"}
+                    return arrow_map.get(ch2, "")
+                try:
+                    return ch.decode("utf-8")
+                except Exception:
+                    return ""
+            time.sleep(0.01)
+        return None
+else:
+    import termios
+    import tty
+
+    def get_key(timeout=0.05):
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+            if rlist:
+                ch = sys.stdin.read(1)
+                if ch == "\x1b":
+                    seq = sys.stdin.read(2)
+                    arrow_map = {"[A": "UP", "[B": "DOWN", "[D": "LEFT", "[C": "RIGHT"}
+                    return arrow_map.get(seq, "")
+                return ch
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+# ============================================================================
+# 1. CONFIG LOADER & RESOLVER
+# ============================================================================
+def resolve_config_path(arg_path: str) -> str:
+    """Resolves config path, checking .json automatically if omitted."""
+    if os.path.isfile(arg_path):
+        return arg_path
+    if not arg_path.lower().endswith(".json"):
+        candidate = f"{arg_path}.json"
+        if os.path.isfile(candidate):
+            return candidate
+    return arg_path
+
+
+def load_camera_config(target: str) -> dict:
+    """Finds and parses the camera configuration from JSON files."""
+    target_clean = target.strip()
+    target_lower = target_clean.lower()
+
+    # 1. Direct path or file match (e.g. 'gate.json' or 'gate')
+    resolved = resolve_config_path(target_clean)
+    if os.path.isfile(resolved):
+        with open(resolved, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "camera" in data and isinstance(data["camera"], dict):
+            return standardize_config(data["camera"])
+        if "cameras" in data and isinstance(data["cameras"], dict):
+            return standardize_config(next(iter(data["cameras"].values())))
+
+    # 2. Match base filename in directory
+    for f_path in glob.glob("*.json"):
+        base_name = os.path.splitext(os.path.basename(f_path))[0].lower()
+        if base_name == target_lower:
+            with open(f_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "camera" in data and isinstance(data["camera"], dict):
+                return standardize_config(data["camera"])
+
+    # 3. Match internal camera name attribute
+    for f_path in glob.glob("*.json"):
+        try:
+            with open(f_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "camera" in data and isinstance(data["camera"], dict):
+                if data["camera"].get("name", "").lower() == target_lower:
+                    return standardize_config(data["camera"])
+        except Exception:
+            continue
+
+    print(f"[ERROR] Could not find any configuration file for camera '{target}'.", file=sys.stderr)
+    sys.exit(1)
+
+
+def standardize_config(cam: dict) -> dict:
+    http_port = cam.get("http_port", 80)
+    vendor = str(cam.get("vendor", "")).lower()
+    ptz_protocol = str(cam.get("ptz_protocol") or cam.get("ptz_type", "")).lower()
+
+    if not ptz_protocol:
+        ptz_protocol = "dahua_cgi" if (vendor == "dahua" or http_port == 80) else "onvif_soap"
+
+    return {
+        "name": cam.get("name", "camera"),
+        "vendor": vendor,
+        "ptz_protocol": ptz_protocol,
+        "host": cam.get("host"),
+        "port": cam.get("port", 554),
+        "http_port": http_port,
+        "username": cam.get("username", "admin"),
+        "password": cam.get("password", ""),
+        "channel": cam.get("channel", 1),
+        "onvif_profile": cam.get("onvif_profile", "Profile_1"),
+        "stream_path": cam.get("main_stream_path", f"/cam/realmonitor?channel={cam.get('channel', 1)}&subtype=0"),
+    }
+
+
+# ============================================================================
+# 2. DIAGNOSTIC PROBING ENGINE
+# ============================================================================
+class CameraDiagnostics:
+    """Runs connectivity and protocol probes before initializing the controller."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.host = cfg["host"]
+        self.rtsp_port = cfg["port"]
+        self.http_port = cfg["http_port"]
+        self.results = {
+            "ping": False,
+            "open_ports": [],
+            "rtsp_status": "NOT TESTED",
+            "protocol_verified": False,
+        }
+
+    def run_preflight_checks(self) -> bool:
+        print("\n" + "=" * 68)
+        print(f"🔍 DIAGNOSTIC PROBE: {self.cfg['name'].upper()} ({self.host})")
+        print("=" * 68)
+
+        # 1. ICMP Ping Probe
+        param = "-n" if sys.platform.startswith("win") else "-c"
+        try:
+            res = subprocess.run(["ping", param, "2", self.host], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.results["ping"] = res.returncode == 0
+        except Exception:
+            self.results["ping"] = False
+        print(f"📡 ICMP Ping               : {'✅ SUCCESS' if self.results['ping'] else '⚠️ NO RESPONSE (May be blocked by firewall)'}")
+
+        # 2. Port Sweep
+        candidate_ports = list(dict.fromkeys([self.http_port, self.rtsp_port, 80, 8899, 8000, 34567, 8080]))
+        for p in candidate_ports:
+            try:
+                with socket.create_connection((self.host, p), timeout=1.5):
+                    self.results["open_ports"].append(p)
+            except Exception:
+                pass
+        print(f"🔌 Open TCP Ports          : {self.results['open_ports'] if self.results['open_ports'] else '❌ NONE FOUND'}")
+
+        if not self.results["open_ports"]:
+            print(f"[ABORT] Cannot reach any TCP service on host {self.host}.", file=sys.stderr)
+            return False
+
+        # 3. RTSP Handshake Probe
+        if self.rtsp_port in self.results["open_ports"] or 554 in self.results["open_ports"]:
+            port = self.rtsp_port if self.rtsp_port in self.results["open_ports"] else 554
+            try:
+                with socket.create_connection((self.host, port), timeout=2.0) as s:
+                    req = f"OPTIONS rtsp://{self.host}:{port}/ RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+                    s.sendall(req.encode("utf-8"))
+                    resp = s.recv(512).decode("utf-8", errors="ignore")
+                    if "RTSP/1.0 200" in resp or "Public:" in resp or "RTSP/1.0 401" in resp:
+                        self.results["rtsp_status"] = f"ACTIVE (Port {port})"
+                    else:
+                        self.results["rtsp_status"] = "PORT OPEN (No RTSP banner)"
+            except Exception as e:
+                self.results["rtsp_status"] = f"FAILED ({e})"
+        else:
+            self.results["rtsp_status"] = "PORT CLOSED"
+
+        print(f"🎥 RTSP Stream Socket      : {self.results['rtsp_status']}")
+        return True
+
+
+# ============================================================================
+# 3. PROTOCOL DRIVERS: DAHUA CGI & ONVIF SOAP
+# ============================================================================
+class DahuaCGIDriver:
+    """Driver for Dahua HTTP CGI endpoint control."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.display_name = cfg.get("name", "Dahua Camera")
+        self.host = cfg["host"]
+        self.port = cfg.get("http_port", 80)
+        self.user = cfg.get("username", "admin")
+        self.password = cfg.get("password", "")
+        self.channel = cfg.get("channel", 1)
+        self.speed = 0.5
+        self.ptz_url = f"http://{self.host}:{self.port}/cgi-bin/ptz.cgi"
+        self.cfg_url = f"http://{self.host}:{self.port}/cgi-bin/configManager.cgi"
+        self.session = requests.Session()
+        self.auth = HTTPDigestAuth(self.user, self.password)
+        self.last_active_code = None
+
+    def _get(self, url: str, params: dict, timeout=2.5):
+        try:
+            res = self.session.get(url, params=params, auth=self.auth, timeout=timeout)
+            if res.status_code == 401:
+                res = self.session.get(url, params=params, auth=HTTPBasicAuth(self.user, self.password), timeout=timeout)
+            return res
+        except Exception:
+            return None
+
+    def read_ptz(self) -> tuple[dict, bool]:
+        coords = {"x": 0.0, "y": 0.0, "z": 0.0, "focus": 0.0, "zoom_val": 0.0, "preset": 0}
+        is_moving = False
+        res = self._get(self.ptz_url, {"action": "getStatus", "channel": self.channel})
+        if res and res.status_code == 200:
+            for line in res.text.splitlines():
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip().lower(), v.strip()
+                if any(m in k for m in ["movestatus", "pantiltstatus", "zoomstatus", "focus.status"]):
+                    if v.lower() not in ["idle", "0", "false", "unknown"]:
+                        is_moving = True
+                try:
+                    if "postion[0]" in k or "position[0]" in k:
+                        coords["x"] = float(v)
+                    elif "postion[1]" in k or "position[1]" in k:
+                        coords["y"] = float(v)
+                    elif "postion[2]" in k or "position[2]" in k:
+                        coords["z"] = float(v)
+                    elif "zoomvalue" in k:
+                        coords["zoom_val"] = float(v)
+                    elif "presetid" in k:
+                        coords["preset"] = int(v)
+                    elif "focusposition" in k or "focusmapvalue" in k:
+                        coords["focus"] = float(v)
+                except ValueError:
+                    continue
+        return coords, is_moving
+
+    def set_ptz(self, direction: str, speed: float = None) -> bool:
+        if speed is None:
+            speed = self.speed
+        direction = direction.lower().strip()
+        if direction == "stop":
+            return self.stop()
+
+        dahua_codes = {
+            "left": "Left", "right": "Right", "up": "Up", "down": "Down",
+            "zoom_in": "ZoomTele", "zoom_out": "ZoomWide",
+            "focus_near": "FocusNear", "focus_far": "FocusFar",
+        }
+        code = dahua_codes.get(direction)
+        if not code:
+            return False
+
+        arg2 = 1 if "focus" in direction else max(1, min(8, int(speed * 8)))
+        params = {"action": "start", "channel": self.channel, "code": code, "arg1": 0, "arg2": arg2, "arg3": 0}
+        res = self._get(self.ptz_url, params)
+        if res and res.status_code == 200:
+            self.last_active_code = code
+            return True
+        return False
+
+    def stop(self) -> bool:
+        codes = [self.last_active_code] if self.last_active_code else [
+            "Left", "Right", "Up", "Down", "ZoomTele", "ZoomWide", "FocusNear", "FocusFar"
+        ]
+        stopped = False
+        for c in codes:
+            if not c:
+                continue
+            res = self._get(self.ptz_url, {"action": "stop", "channel": self.channel, "code": c, "arg1": 0, "arg2": 0, "arg3": 0})
+            if res and res.status_code == 200:
+                stopped = True
+        self.last_active_code = None
+        return stopped
+
+    def goto_preset(self, preset_id: int) -> bool:
+        p = {"action": "start", "channel": self.channel, "code": "GotoPreset", "arg1": 0, "arg2": int(preset_id), "arg3": 0}
+        res = self._get(self.ptz_url, p)
+        return res is not None and res.status_code == 200 and "ok" in res.text.lower()
+
+    def set_preset(self, preset_id: int) -> bool:
+        p = {"action": "start", "channel": self.channel, "code": "SetPreset", "arg1": 0, "arg2": int(preset_id), "arg3": 0}
+        res = self._get(self.ptz_url, p)
+        return res is not None and res.status_code == 200 and "ok" in res.text.lower()
+
+    def trigger_autofocus(self) -> bool:
+        self._get(self.cfg_url, {"action": "setConfig", "VideoInFocus[0][0].Mode": 2})
+        res = self._get(self.cfg_url, {"action": "setConfig", "VideoInFocus[0][0].Mode": 3})
+        return res is not None and res.status_code == 200
+
+    def init_lens(self) -> bool:
+        res = self._get(self.ptz_url, {"action": "start", "channel": self.channel, "code": "LensInit", "arg1": 0, "arg2": 0, "arg3": 0})
+        return res is not None and res.status_code == 200
+
+    def wait_until_idle(self, timeout: float = 8.0) -> tuple[dict, bool]:
+        start = time.time()
+        time.sleep(0.35)
+        coords, moving = self.read_ptz()
+        while moving and (time.time() - start) < timeout:
+            time.sleep(0.25)
+            coords, moving = self.read_ptz()
+        return coords, moving
+
+
+class ONVIFSoapDriver:
+    """Driver for ONVIF WS-Security SOAP control (APCam / Xiongmai / Goke)."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.display_name = cfg.get("name", "ONVIF Camera")
+        self.host = cfg["host"]
+        self.port = cfg.get("http_port", 8899)
+        self.user = cfg.get("username", "admin")
+        self.password = cfg.get("password", "")
+        self.speed = 0.5
+        self.endpoint = f"http://{self.host}:{self.port}/onvif/device_service"
+        self.profile_token = cfg.get("onvif_profile", "Profile_1")
+        self._discover_profile()
+
+    def _build_wsse_header(self) -> str:
+        created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        nonce_raw = os.urandom(16)
+        nonce_b64 = base64.b64encode(nonce_raw).decode("ascii")
+        sha = hashlib.sha1()
+        sha.update(nonce_raw + created.encode("utf-8") + self.password.encode("utf-8"))
+        digest_b64 = base64.b64encode(sha.digest()).decode("ascii")
+
+        return f"""<wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+            <wsse:UsernameToken>
+                <wsse:Username>{self.user}</wsse:Username>
+                <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-1.0.xsd#PasswordDigest">{digest_b64}</wsse:Password>
+                <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{nonce_b64}</wsse:Nonce>
+                <wsu:Created>{created}</wsu:Created>
+            </wsse:UsernameToken>
+        </wsse:Security>"""
+
+    def _post_soap(self, body_xml: str, timeout: float = 2.5):
+        header = self._build_wsse_header()
+        soap_env = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
+            xmlns:tt="http://www.onvif.org/ver10/schema"
+            xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+    <s:Header>{header}</s:Header>
+    <s:Body>{body_xml}</s:Body>
+</s:Envelope>"""
+
+        headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
+        endpoints_to_try = [
+            self.endpoint,
+            f"http://{self.host}:{self.port}/onvif/ptz_service"
+        ]
+
+        for url in endpoints_to_try:
+            try:
+                res = requests.post(url, data=soap_env.encode("utf-8"), headers=headers, timeout=timeout)
+                if res.status_code == 200:
+                    self.endpoint = url
+                    return res
+                if res.status_code in [400, 415]:
+                    h11 = {"Content-Type": "text/xml; charset=utf-8"}
+                    res11 = requests.post(url, data=soap_env.encode("utf-8"), headers=h11, timeout=timeout)
+                    if res11.status_code == 200:
+                        self.endpoint = url
+                        return res11
+            except Exception:
+                pass
+        return None
+
+    def _discover_profile(self):
+        body = "<trt:GetProfiles/>"
+        res = self._post_soap(body)
+        if res and res.status_code == 200:
+            tokens = re.findall(r'token="([^"]+)"', res.text)
+            if not tokens:
+                tokens = re.findall(r"<trt:token>([^<]+)</trt:token>", res.text)
+            if tokens:
+                self.profile_token = tokens[0]
+                return
+        self.profile_token = self.cfg.get("onvif_profile", "Profile_1")
+
+    def read_ptz(self) -> tuple[dict, bool]:
+        coords = {"x": 0.0, "y": 0.0, "z": 0.0, "focus": 0.0, "zoom_val": 0.0, "preset": 0}
+        is_moving = False
+        body = f"<tptz:GetStatus><tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken></tptz:GetStatus>"
+        res = self._post_soap(body, timeout=1.5)
+        if res and res.status_code == 200:
+            try:
+                root = ET.fromstring(res.text)
+                for elem in root.iter():
+                    tag = elem.tag.split("}")[-1].lower()
+                    if tag == "pantilt":
+                        coords["x"] = float(elem.attrib.get("x", coords["x"]))
+                        coords["y"] = float(elem.attrib.get("y", coords["y"]))
+                    elif tag == "zoom":
+                        coords["z"] = float(elem.attrib.get("x", coords["z"]))
+                    elif tag == "movestatus" and "moving" in "".join(elem.itertext()).lower():
+                        is_moving = True
+            except Exception:
+                pass
+        return coords, is_moving
+
+    def set_ptz(self, direction: str, speed: float = None) -> bool:
+        if speed is None:
+            speed = self.speed
+        direction = direction.lower().strip()
+        if direction == "stop":
+            return self.stop()
+
+        x, y = 0.0, 0.0
+        if direction == "left":
+            x = -speed
+        elif direction == "right":
+            x = speed
+        elif direction == "up":
+            y = speed
+        elif direction == "down":
+            y = -speed
+
+        body = f"""<tptz:ContinuousMove>
+            <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:Velocity>
+                <tt:PanTilt x="{x}" y="{y}"/>
+            </tptz:Velocity>
+        </tptz:ContinuousMove>"""
+        res = self._post_soap(body)
+        return res is not None and res.status_code == 200
+
+    def stop(self) -> bool:
+        body = f"""<tptz:Stop>
+            <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:PanTilt>true</tptz:PanTilt>
+            <tptz:Zoom>true</tptz:Zoom>
+        </tptz:Stop>"""
+        res = self._post_soap(body, timeout=1.5)
+        return res is not None and res.status_code == 200
+
+    def goto_preset(self, preset_id: int) -> bool:
+        body = f"""<tptz:GotoPreset>
+            <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:PresetToken>{preset_id}</tptz:PresetToken>
+        </tptz:GotoPreset>"""
+        res = self._post_soap(body)
+        return res is not None and res.status_code == 200
+
+    def set_preset(self, preset_id: int) -> bool:
+        body = f"""<tptz:SetPreset>
+            <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:PresetToken>{preset_id}</tptz:PresetToken>
+            <tptz:PresetName>Preset_{preset_id}</tptz:PresetName>
+        </tptz:SetPreset>"""
+        res = self._post_soap(body)
+        return res is not None and res.status_code == 200
+
+    def trigger_autofocus(self) -> bool:
+        return False
+
+    def init_lens(self) -> bool:
+        return False
+
+    def wait_until_idle(self, timeout: float = 8.0) -> tuple[dict, bool]:
+        start = time.time()
+        time.sleep(0.35)
+        coords, moving = self.read_ptz()
+        while moving and (time.time() - start) < timeout:
+            time.sleep(0.25)
+            coords, moving = self.read_ptz()
+        return coords, moving
+
+
+def build_driver(cam_cfg: dict):
+    """Instantiates driver based on the verified camera configuration."""
+    proto = cam_cfg["ptz_protocol"]
+    if "dahua" in proto or proto == "dahua_cgi":
+        return DahuaCGIDriver(cam_cfg)
+    return ONVIFSoapDriver(cam_cfg)
+
+
+# ============================================================================
+# 4. INTERACTIVE KEYPAD CONTROLLER LOOP
+# ============================================================================
+def run_interactive_controller(driver):
+    proto = "DAHUA CGI" if isinstance(driver, DahuaCGIDriver) else "ONVIF SOAP"
+    print("\n" + "=" * 68)
+    print(f"🎮 PTZ CONTROLLER ACTIVE: {driver.display_name.upper()} [{proto}]")
+    print(f"📡 Target: {driver.host}:{driver.port}")
+    print("=" * 68)
+    print("  PAN / TILT:")
+    print("    [8] or [W] or [↑]   : Tilt UP")
+    print("    [2] or [S] or [↓]   : Tilt DOWN")
+    print("    [4] or [A] or [←]   : Pan LEFT")
+    print("    [6] or [D] or [→]   : Pan RIGHT")
+    print("  ZOOM:")
+    print("    [7] or [U] or [+]   : Zoom IN (Tele)")
+    print("    [9] or [O] or [-]   : Zoom OUT (Wide)")
+    print("  PRESETS:")
+    print("    [G] or [P]          : GOTO Preset Number")
+    print("    [M]                 : MEMORIZE/SAVE Current Position as Preset")
+    print("  FOCUS & LENS:")
+    print("    [J] / [K]           : Focus NEAR / Focus FAR")
+    print("    [T]                 : Reset AUTO-FOCUS")
+    print("    [L]                 : Calibrate LENS (LensInit)")
+    print("  GENERAL:")
+    print("    [5] or [Space]      : STOP Motor")
+    print("    [R]                 : Read Live Coordinates")
+    print("    [1] / [2] / [3]     : Speed (Slow 0.2 / Med 0.5 / Fast 0.8)")
+    print("    [Q]                 : Quit Controller")
+    print("=" * 68)
+
+    coords, moving = driver.read_ptz()
+    print(f"📍 Initial: Pan={coords['x']:.2f}°, Tilt={coords['y']:.2f}°, Zoom={coords['z']:.2f} | State: {'MOVING' if moving else 'IDLE'}\n")
+
+    cmd_label = "IDLE"
+    try:
+        while True:
+            key = get_key(timeout=0.08)
+            if not key:
+                continue
+
+            k = key.lower() if isinstance(key, str) else ""
+
+            if k == "q":
+                print("\n[KEYPAD] Exiting...")
+                driver.stop()
+                break
+            elif k in ("w", "8", "up"):
+                ok = driver.set_ptz("up")
+                cmd_label = "TILT UP [OK]" if ok else "TILT UP [FAIL]"
+            elif k in ("s", "2", "down"):
+                ok = driver.set_ptz("down")
+                cmd_label = "TILT DOWN [OK]" if ok else "TILT DOWN [FAIL]"
+            elif k in ("a", "4", "left"):
+                ok = driver.set_ptz("left")
+                cmd_label = "PAN LEFT [OK]" if ok else "PAN LEFT [FAIL]"
+            elif k in ("d", "6", "right"):
+                ok = driver.set_ptz("right")
+                cmd_label = "PAN RIGHT [OK]" if ok else "PAN RIGHT [FAIL]"
+            elif k in ("u", "7", "+"):
+                ok = driver.set_ptz("zoom_in")
+                cmd_label = "ZOOM IN [OK]" if ok else "ZOOM IN [FAIL]"
+            elif k in ("o", "9", "-"):
+                ok = driver.set_ptz("zoom_out")
+                cmd_label = "ZOOM OUT [OK]" if ok else "ZOOM OUT [FAIL]"
+            elif k in ("j", "n"):
+                ok = driver.set_ptz("focus_near")
+                cmd_label = "FOCUS NEAR"
+            elif k in ("k", "f"):
+                ok = driver.set_ptz("focus_far")
+                cmd_label = "FOCUS FAR"
+            elif k == "t":
+                driver.trigger_autofocus()
+                cmd_label = "AUTOFOCUS"
+            elif k == "l":
+                driver.init_lens()
+                cmd_label = "LENS INIT"
+            elif k in ("g", "p"):
+                driver.stop()
+                val = input("\n🎯 Enter Preset Number: ").strip()
+                if val.isdigit():
+                    num = int(val)
+                    print(f"🚀 Moving to Preset {num}...")
+                    if driver.goto_preset(num):
+                        c, _ = driver.wait_until_idle()
+                        print(f"✅ Reached Preset {num} -> Pan: {c['x']:.2f}°, Tilt: {c['y']:.2f}°")
+                        cmd_label = f"PRESET {num}"
+                    else:
+                        print(f"❌ Failed to reach Preset {num}.")
+                continue
+            elif k == "m":
+                driver.stop()
+                val = input("\n💾 Enter Preset Number to save current position: ").strip()
+                if val.isdigit():
+                    num = int(val)
+                    if driver.set_preset(num):
+                        print(f"✅ Position saved as Preset {num}!")
+                        cmd_label = f"SAVED P{num}"
+                    else:
+                        print(f"❌ Failed to save Preset {num}.")
+                continue
+            elif k in (" ", "5"):
+                driver.stop()
+                cmd_label = "STOPPED"
+            elif k == "1":
+                driver.speed = 0.2
+                cmd_label = "SPEED 0.2"
+            elif k == "2":
+                driver.speed = 0.5
+                cmd_label = "SPEED 0.5"
+            elif k == "3":
+                driver.speed = 0.8
+                cmd_label = "SPEED 0.8"
+            elif k == "r":
+                coords, moving = driver.read_ptz()
+                print(f"\n📍 Live: Pan: {coords['x']:.2f}° | Tilt: {coords['y']:.2f}° | Zoom: {coords['z']:.2f} | Focus: {coords['focus']:.0f} | State: {'MOVING' if moving else 'IDLE'}")
+                continue
+
+            print(f"\rCommand: {cmd_label:<20} | Speed: {driver.speed:.1f} ", end="", flush=True)
+
+    except KeyboardInterrupt:
+        print("\n[KEYPAD] Interrupted.")
+    finally:
+        driver.stop()
+
+
+# ============================================================================
+# 5. MAIN ENTRY POINT
+# ============================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="Unified Diagnostic Prober & PTZ Controller for IP Cameras",
+        usage="%(prog)s <camera_name_or_json> [preset_number]",
+    )
+    parser.add_argument("camera", nargs="?", default=None, help="Camera name or JSON file (e.g. 'gate', 'gate.json', 'apcam').")
+    parser.add_argument("preset", nargs="?", default=None, help="Preset number to move camera directly to.")
+    parser.add_argument("--set-preset", type=int, default=None, help="Save current position as preset number.")
+    args = parser.parse_args()
+
+    if not args.camera:
+        parser.print_help()
+        sys.exit(1)
+
+    cam_cfg = load_camera_config(args.camera)
+
+    # Stage 1: Diagnostic Pre-Flight Probing
+    prober = CameraDiagnostics(cam_cfg)
+    if not prober.run_preflight_checks():
+        sys.exit(1)
+
+    # Stage 2: Initialize Appropriate Helper Driver
+    driver = build_driver(cam_cfg)
+
+    # Stage 3: Initial PTZ Status Verification
+    coords, moving = driver.read_ptz()
+    proto = "DAHUA CGI" if isinstance(driver, DahuaCGIDriver) else "ONVIF SOAP"
+
+    print("\n" + "=" * 68)
+    print("📋 INITIAL TELEMETRY DASHBOARD")
+    print("=" * 68)
+    print(f"  Camera Name        : {driver.display_name}")
+    print(f"  Resolved Protocol  : {proto}")
+    print(f"  Pan (X) / Tilt (Y) : {coords['x']:.2f}° / {coords['y']:.2f}°")
+    print(f"  Zoom / Focus       : {coords['z']:.2f} / {coords['focus']:.0f}")
+    print(f"  Motor Status       : {'🏃 MOVING' if moving else '🟢 IDLE'}")
+    print("=" * 68)
+
+    # CLI Direct Action: Save current position as preset
+    if args.set_preset is not None:
+        print(f"\n💾 Saving Preset {args.set_preset} on {driver.display_name}...")
+        if driver.set_preset(args.set_preset):
+            print("✅ Preset saved successfully.")
+        else:
+            print("❌ Failed to save preset.")
+        sys.exit(0)
+
+    # CLI Direct Action: Move directly to a preset number
+    if args.preset is not None and args.preset.isdigit():
+        preset_num = int(args.preset)
+        print(f"\n🎯 Moving {driver.display_name} to Preset {preset_num}...")
+        if driver.goto_preset(preset_num):
+            final_coords, _ = driver.wait_until_idle()
+            print(f"✅ Arrived at Preset {preset_num}! Pan: {final_coords['x']:.2f}°, Tilt: {final_coords['y']:.2f}°, Zoom: {final_coords['z']:.2f}")
+        else:
+            print(f"❌ Could not move to Preset {preset_num}.")
+        sys.exit(0)
+
+    # Default Action: Launch Keypad Controller Loop
+    run_interactive_controller(driver)
+
+
+if __name__ == "__main__":
+    main()
