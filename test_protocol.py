@@ -119,7 +119,7 @@ def standardize_config(cam: dict) -> dict:
     ptz_protocol = str(cam.get("ptz_protocol") or cam.get("ptz_type", "")).lower()
 
     if not ptz_protocol:
-        ptz_protocol = "dahua_cgi" if (vendor == "dahua" or http_port == 80) else "onvif_soap"
+        ptz_protocol = "dahua_cgi" if vendor == "dahua" else "onvif_soap"
 
     return {
         "name": cam.get("name", "camera"),
@@ -343,6 +343,8 @@ class ONVIFSoapDriver:
         self.speed = 0.5
         self.endpoint = f"http://{self.host}:{self.port}/onvif/device_service"
         self.profile_token = cfg.get("onvif_profile", "Profile_1")
+        self.last_error = None   # why the last SOAP call failed, e.g. "400 NotAuthorized"
+        self.auth_ok = False     # True once GetProfiles succeeded
         self._discover_profile()
 
     def _build_wsse_header(self) -> str:
@@ -384,21 +386,25 @@ class ONVIFSoapDriver:
                 res = requests.post(url, data=soap_env.encode("utf-8"), headers=headers, timeout=timeout)
                 if res.status_code == 200:
                     self.endpoint = url
+                    self.last_error = None
                     return res
+                fault = re.findall(r"<[\w-]*:?Value>\s*[\w-]+:(\w+)\s*</", res.text)
+                self.last_error = f"{res.status_code} {fault[-1] if fault else ''}".strip()
                 if res.status_code in [400, 415]:
                     h11 = {"Content-Type": "text/xml; charset=utf-8"}
                     res11 = requests.post(url, data=soap_env.encode("utf-8"), headers=h11, timeout=timeout)
                     if res11.status_code == 200:
                         self.endpoint = url
                         return res11
-            except Exception:
-                pass
+            except Exception as e:
+                self.last_error = self.last_error or type(e).__name__
         return None
 
     def _discover_profile(self):
         body = "<trt:GetProfiles/>"
         res = self._post_soap(body)
         if res and res.status_code == 200:
+            self.auth_ok = True
             tokens = re.findall(r'token="([^"]+)"', res.text)
             if not tokens:
                 tokens = re.findall(r"<trt:token>([^<]+)</trt:token>", res.text)
@@ -497,11 +503,348 @@ class ONVIFSoapDriver:
 
 
 def build_driver(cam_cfg: dict):
-    """Instantiates driver based on the verified camera configuration."""
+    """Instantiates driver based on the verified camera configuration.
+    Returns None when the camera has no PTZ (ptz_protocol 'none')."""
     proto = cam_cfg["ptz_protocol"]
+    if proto in ("none", "off", "no"):
+        return None
     if "dahua" in proto or proto == "dahua_cgi":
         return DahuaCGIDriver(cam_cfg)
     return ONVIFSoapDriver(cam_cfg)
+
+
+# ============================================================================
+# 3b. CAMERA TEST -> EDGE_WORKER CAMERA JSON  (--test)
+# ============================================================================
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(SCRIPT_DIR, "out")
+
+# RTSP paths tried on non-Dahua cameras (after the ones already in the camera JSON).
+GENERIC_RTSP_PATHS = ["/live/ch0", "/live/ch1", "/onvif1", "/onvif2", "/11", "/12",
+                      "/stream0", "/stream1", "/h264/ch1/main/av_stream", "/h264/ch1/sub/av_stream"]
+
+# Used when no existing camera JSON is given (same layout as edge_worker/livingroom.json).
+JSON_TEMPLATE = {
+    "camera": {"name": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
+               "http_port": 80, "username": "admin", "password": "",
+               "invert_stream": False, "ptz_markers": {}},
+    "connection": {"rtsp_transport": "tcp", "buffer_size": 1},
+    "sensor_hardware_properties": {
+        "brightness": 50, "contrast": 50, "saturation": 50, "sharpness": 40,
+        "shutter_speed_sec": "1/100", "gain": 12, "wdr_enabled": True, "wdr_level": 3,
+        "noise_reduction_3d": 50, "day_night_mode": "auto", "white_balance_mode": "auto"},
+    "stream_encoder_properties": {
+        "codec": "H.264", "smart_codec": False, "sub_stream_resolution": [640, 480],
+        "main_stream_resolution": [1920, 1080], "fps": 20, "gop_keyframe_interval": 20,
+        "bitrate_type": "CBR", "bitrate_kbps": 2048},
+    "motion": {
+        "enabled": True, "heartbeat_interval_sec": 0.0, "grid_rows": 6, "grid_cols": 8,
+        "motion_threshold_min": 1800, "max_lighting_ratio": 0.6, "initial_snap_delay_sec": 1.0,
+        "diff_multiplier_threshold": 10.0, "post_roll_buffer_sec": 3.0, "cooldown_period_sec": 10.0,
+        "bg_scan_frame_step": 2, "draw_motion_box": True, "use_roi": False,
+        "roi_crop": [0.2, 0.2, 0.8, 0.8], "min_sharpness": 100, "min_brightness": 50,
+        "max_brightness": 220},
+    "face_quality": {"enabled": True, "min_face_width": 120, "min_face_height": 120},
+}
+SECTION_ORDER = ["camera", "connection", "sensor_hardware_properties",
+                 "stream_encoder_properties", "motion", "face_quality"]
+
+
+def log(name: str, msg: str):
+    print(f"{name} {time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+def load_full_json(target: str):
+    """Returns (path, full camera JSON) for the same lookups load_camera_config does, or (None, None)."""
+    candidates = [resolve_config_path(target.strip())]
+    candidates += [p for p in glob.glob("*.json")
+                   if os.path.splitext(os.path.basename(p))[0].lower() == target.strip().lower()]
+    candidates += glob.glob("*.json")
+    for p in candidates:
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        cam = data.get("camera") if isinstance(data, dict) else None
+        if not isinstance(cam, dict):
+            continue
+        if p == candidates[0] or os.path.splitext(os.path.basename(p))[0].lower() == target.lower() \
+                or str(cam.get("name", "")).lower() == target.lower():
+            return p, data
+    return None, None
+
+
+def rtsp_url(cfg: dict, path: str) -> str:
+    user = urllib.parse.quote(cfg.get("username") or "", safe="")
+    pw = urllib.parse.quote(cfg.get("password") or "", safe="")
+    auth = f"{user}:{pw}@" if user else ""
+    return f"rtsp://{auth}{cfg['host']}:{cfg['port']}{path}"
+
+
+def mask(text: str, cfg: dict) -> str:
+    """Hides the password (plain and URL-encoded) in tool messages."""
+    pw = cfg.get("password") or ""
+    for v in {pw, urllib.parse.quote(pw, safe="")}:
+        if v:
+            text = text.replace(v, "***")
+    return text
+
+
+def ffprobe_stream(url: str, seconds: int = 13, timeout: int = 30):
+    """Reads ~seconds of video; returns codec, width, height, fps, gop (frames between keyframes)."""
+    cmd = ["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-timeout", "5000000", "-select_streams", "v:0",
+           "-read_intervals", f"%+{seconds}",
+           "-show_entries", "stream=codec_name,width,height,avg_frame_rate,r_frame_rate:frame=key_frame",
+           "-of", "json", url]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return None, type(e).__name__
+    if r.returncode != 0 or not r.stdout.strip():
+        return None, (r.stderr.strip().splitlines() or ["no output"])[-1][:120]
+    d = json.loads(r.stdout)
+    if not d.get("streams"):
+        return None, "no video stream"
+    s = d["streams"][0]
+    fps = 0.0
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        num, _, den = (s.get(key) or "0/0").partition("/")
+        if float(den or 0):
+            fps = round(float(num) / float(den), 2)
+            break
+    keys = [i for i, fr in enumerate(d.get("frames", [])) if fr.get("key_frame") == 1]
+    gops = [b - a for a, b in zip(keys, keys[1:])]
+    return {"codec": s.get("codec_name"), "width": s.get("width"), "height": s.get("height"),
+            "fps": fps, "gop": max(gops) if gops else None,
+            "frames_read": len(d.get("frames", []))}, None
+
+
+def stream_candidates(cfg: dict, raw_cam: dict, extended: bool = False):
+    """(label, path, dahua_subtype) tuples to try. Cheap cameras stop answering for a while
+    after several bad paths, so the long generic list is only used when nothing else worked."""
+    ch = cfg.get("channel", 1)
+    if cfg["vendor"] == "dahua" or cfg["ptz_protocol"] == "dahua_cgi":
+        return [(f"subtype{st}", f"/cam/realmonitor?channel={ch}&subtype={st}", st) for st in (0, 1, 2)]
+    paths = [raw_cam.get("main_stream_path"), raw_cam.get("sub_stream_path")] +         (GENERIC_RTSP_PATHS if extended else ["/live/ch0", "/live/ch1"])
+    seen, out = set(), []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append((p, p, None))
+    return out
+
+
+def test_streams(cfg: dict, raw_cam: dict, report: dict):
+    name = cfg["name"]
+    found = []
+    candidates = stream_candidates(cfg, raw_cam)
+    for label, path, subtype in candidates:
+        info, err = ffprobe_stream(rtsp_url(cfg, path))
+        if not info:
+            log(name, f"stream {label} none ({mask(err, cfg).split(': ')[-1]})")
+            continue
+        info.update({"path": path, "subtype": subtype})
+        found.append(info)
+        log(name, f"stream {label} {info['width']}x{info['height']} {info['codec']} "
+                  f"{info['fps']}fps gop{info['gop']}")
+    if not found and subtype is None:
+        tried = {c[1] for c in candidates}
+        for label, path, subtype in stream_candidates(cfg, raw_cam, extended=True):
+            if path in tried:
+                continue
+            info, err = ffprobe_stream(rtsp_url(cfg, path))
+            if not info:
+                log(name, f"stream {label} none ({mask(err, cfg).split(': ')[-1]})")
+                continue
+            info.update({"path": path, "subtype": None})
+            found.append(info)
+            log(name, f"stream {label} {info['width']}x{info['height']} {info['codec']} "
+                      f"{info['fps']}fps gop{info['gop']}")
+    report["streams"] = found
+    if not found:
+        return None, None
+    # Main = largest picture. Sub = smallest picture that differs from main, else main again.
+    by_size = sorted(found, key=lambda s: (s["width"] or 0) * (s["height"] or 0), reverse=True)
+    main = by_size[0]
+    smaller = [s for s in by_size if (s["width"], s["height"]) != (main["width"], main["height"])]
+    sub = smaller[-1] if smaller else main
+    log(name, f"pick main {main['path']} sub {sub['path']}")
+    return main, sub
+
+
+def read_dahua_encoder(cfg: dict, report: dict):
+    """Reads Encode config via CGI. Returns {'main': {...}, 'sub': {...}} or {}."""
+    drv = DahuaCGIDriver(cfg)
+    res = drv._get(drv.cfg_url, {"action": "getConfig", "name": "Encode"}, timeout=4)
+    if not res or res.status_code != 200:
+        report["encoder_error"] = f"getConfig Encode -> {res.status_code if res else 'no response'}"
+        return {}
+    idx = cfg.get("channel", 1) - 1
+    out = {"main": {}, "sub": {}}
+    pat = re.compile(rf"table\.Encode\[{idx}\]\.(MainFormat|ExtraFormat)\[0\]\.Video\.(\w+)=(.*)")
+    for line in res.text.splitlines():
+        m = pat.match(line.strip())
+        if m:
+            out["main" if m.group(1) == "MainFormat" else "sub"][m.group(2)] = m.group(3).strip()
+    report["encoder"] = out
+    return out
+
+
+def copy_test(cfg: dict, path: str, seconds: int, report: dict) -> bool:
+    """Records with -c copy like multy.py, then checks the file's length and keyframes."""
+    name = cfg["name"]
+    os.makedirs(OUT_DIR, exist_ok=True)
+    out_file = os.path.join(OUT_DIR, f"{name}_copytest.mp4")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-rtsp_transport", "tcp", "-timeout", "5000000", "-i", rtsp_url(cfg, path),
+           "-t", str(seconds), "-map", "0:v:0", "-c", "copy", out_file]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=seconds + 30)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        report["copy_test"] = {"ok": False, "error": type(e).__name__}
+        log(name, f"copytest FAIL {type(e).__name__}")
+        return False
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "packet=flags", "-of", "csv=p=0", out_file],
+                           capture_output=True, text=True) if os.path.isfile(out_file) else None
+    flags = probe.stdout.split() if probe and probe.returncode == 0 else []
+    dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                          "csv=p=0", out_file], capture_output=True, text=True).stdout.strip() \
+        if os.path.isfile(out_file) else ""
+    duration = float(dur) if dur.replace(".", "", 1).isdigit() else 0.0
+    keyframes = sum(1 for f in flags if f.startswith("K"))
+    ok = r.returncode == 0 and duration >= seconds * 0.8 and keyframes >= 1
+    report["copy_test"] = {"ok": ok, "seconds": seconds, "duration": round(duration, 2),
+                           "packets": len(flags), "keyframes": keyframes,
+                           "ffmpeg_error": mask((r.stderr.strip().splitlines() or [""])[-1], cfg)[:160]}
+    log(name, f"copytest {'OK' if ok else 'FAIL'} {duration:.1f}s {len(flags)} frames {keyframes} keyframes")
+    return ok
+
+
+def test_control(cfg: dict, report: dict) -> str:
+    """Checks the PTZ/config login. Returns the ptz_protocol to write."""
+    name = cfg["name"]
+    proto = cfg["ptz_protocol"]
+    if proto in ("none", "off", "no"):
+        log(name, "ptz none (from camera JSON)")
+        report["ptz"] = {"protocol": "none"}
+        return "none"
+    drv = build_driver(cfg)
+    if isinstance(drv, DahuaCGIDriver):
+        res = drv._get(drv.ptz_url, {"action": "getStatus", "channel": drv.channel})
+        ok = bool(res and res.status_code == 200)
+        coords, _ = drv.read_ptz() if ok else ({}, False)
+        report["ptz"] = {"protocol": "dahua_cgi", "ok": ok, "status": coords}
+        log(name, f"ptz dahua_cgi {'OK' if ok else 'FAIL'}" + (f" pan {coords['x']} tilt {coords['y']}" if ok else ""))
+        return "dahua_cgi" if ok else proto
+    ok = drv.auth_ok
+    report["ptz"] = {"protocol": "onvif_soap", "ok": ok, "profile": drv.profile_token,
+                     "error": drv.last_error}
+    log(name, f"ptz onvif {'OK profile ' + drv.profile_token if ok else 'FAIL ' + str(drv.last_error)}")
+    return proto
+
+
+def build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, report):
+    data = json.loads(json.dumps(base or JSON_TEMPLATE))  # deep copy
+    for sec in SECTION_ORDER:
+        data.setdefault(sec, json.loads(json.dumps(JSON_TEMPLATE[sec])))
+    cam = data["camera"]
+    cam.update({"name": cfg["name"], "vendor": cfg["vendor"] or cam.get("vendor", "generic"),
+                "ptz_protocol": ptz_protocol, "host": cfg["host"], "port": cfg["port"],
+                "http_port": cfg["http_port"], "username": cfg["username"],
+                "password": cfg["password"]})
+    cam.setdefault("invert_stream", False)
+    if main and main.get("subtype") is not None:
+        cam["channel"] = cfg.get("channel", 1)
+        cam["main_stream_subtype"] = main["subtype"]
+        cam["sub_stream_subtype"] = sub["subtype"]
+        cam.pop("main_stream_path", None)
+        cam.pop("sub_stream_path", None)
+    elif main:
+        cam["main_stream_path"] = main["path"]
+        cam["sub_stream_path"] = sub["path"]
+    if copy_ok:
+        data["connection"]["rtsp_transport"] = "tcp"
+
+    enc = data["stream_encoder_properties"]
+    if main:
+        codec = {"h264": "H.264", "hevc": "H.265"}.get(main["codec"], main["codec"])
+        enc.update({"codec": codec, "main_stream_resolution": [main["width"], main["height"]],
+                    "sub_stream_resolution": [sub["width"], sub["height"]],
+                    "fps": int(round(main["fps"])) if main["fps"] else enc.get("fps")})
+        if main["gop"]:
+            enc["gop_keyframe_interval"] = main["gop"]
+    m = (encoder or {}).get("main", {})
+    if m.get("BitRate", "").isdigit():
+        enc["bitrate_kbps"] = int(m["BitRate"])
+    if m.get("BitRateControl"):
+        enc["bitrate_type"] = m["BitRateControl"]
+
+    # Problems multy.py would hit.
+    issues = []
+    if not main:
+        issues.append("no working RTSP stream")
+    else:
+        if main["codec"] != "h264":
+            issues.append(f"main stream is {main['codec']}, multy needs H.264")
+        if sub["codec"] != "h264":
+            issues.append(f"sub stream is {sub['codec']}, multy needs H.264")
+        if main["gop"] and main["fps"] and main["gop"] > 2 * main["fps"]:
+            issues.append(f"keyframe every {main['gop']} frames ({main['gop'] / main['fps']:.1f}s); "
+                          f"set GOP to {int(round(main['fps']))} on the camera")
+        if sub is main:
+            issues.append("only one stream size found; sub stream = main stream")
+    if not copy_ok:
+        issues.append("stream-copy record test failed")
+    if ptz_protocol not in ("none",) and not report.get("ptz", {}).get("ok"):
+        issues.append(f"{ptz_protocol} login failed (check the ONVIF/HTTP user and password)")
+    report["issues"] = issues
+    return {sec: data[sec] for sec in SECTION_ORDER} | {k: v for k, v in data.items() if k not in SECTION_ORDER}
+
+
+def run_camera_test(target: str, copy_seconds: int) -> int:
+    path, base = load_full_json(target)
+    cfg = load_camera_config(target)
+    name = cfg["name"]
+    log(name, f"test start {cfg['host']} (config {path or 'none, using template'})")
+    report = {"name": name, "host": cfg["host"], "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "source_config": path}
+
+    prober = CameraDiagnostics(cfg)
+    if not prober.run_preflight_checks():
+        log(name, "test stop: camera not reachable")
+        return 1
+    report["reach"] = prober.results
+
+    ptz_protocol = test_control(cfg, report)
+    main, sub = test_streams(cfg, (base or {}).get("camera", {}), report)
+    encoder = read_dahua_encoder(cfg, report) if ptz_protocol == "dahua_cgi" else {}
+    if encoder.get("main"):
+        e = encoder["main"]
+        log(name, f"encoder main {e.get('Compression')} {e.get('Width')}x{e.get('Height')} "
+                  f"{e.get('FPS')}fps gop{e.get('GOP')} {e.get('BitRateControl')} {e.get('BitRate')}kbps")
+    copy_ok = False
+    if main and copy_seconds > 0:
+        copy_ok = copy_test(cfg, main["path"], copy_seconds, report)
+        if not copy_ok:
+            log(name, "copytest retry in 5s")
+            time.sleep(5)
+            copy_ok = copy_test(cfg, main["path"], copy_seconds, report)
+
+    data = build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, report)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(path))[0] if path else name
+    json_path = os.path.join(OUT_DIR, f"{stem}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    with open(os.path.join(OUT_DIR, f"{stem}.report.json"), "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    for issue in report["issues"]:
+        log(name, f"ISSUE {issue}")
+    log(name, f"wrote {json_path} ({'ready' if not report['issues'] else str(len(report['issues'])) + ' issues'})")
+    return 0 if not report["issues"] else 2
 
 
 # ============================================================================
@@ -641,11 +984,19 @@ def main():
     parser.add_argument("camera", nargs="?", default=None, help="Camera name or JSON file (e.g. 'gate', 'gate.json', 'apcam').")
     parser.add_argument("preset", nargs="?", default=None, help="Preset number to move camera directly to.")
     parser.add_argument("--set-preset", type=int, default=None, help="Save current position as preset number.")
+    parser.add_argument("--test", action="store_true",
+                        help="Test the camera (reach, PTZ login, streams, encoder, copy record) and write "
+                             "out/<name>.json for edge_worker plus out/<name>.report.json.")
+    parser.add_argument("--copy-seconds", type=int, default=10,
+                        help="Length of the stream-copy record test in --test (0 skips it).")
     args = parser.parse_args()
 
     if not args.camera:
         parser.print_help()
         sys.exit(1)
+
+    if args.test:
+        sys.exit(run_camera_test(args.camera, args.copy_seconds))
 
     cam_cfg = load_camera_config(args.camera)
 
@@ -656,6 +1007,9 @@ def main():
 
     # Stage 2: Initialize Appropriate Helper Driver
     driver = build_driver(cam_cfg)
+    if driver is None:
+        print(f"[INFO] {cam_cfg['name']} has ptz_protocol 'none'; no PTZ control. Use --test to test streams.")
+        sys.exit(0)
 
     # Stage 3: Initial PTZ Status Verification
     coords, moving = driver.read_ptz()
