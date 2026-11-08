@@ -331,7 +331,11 @@ class DahuaCGIDriver:
 
 
 class ONVIFSoapDriver:
-    """Driver for ONVIF WS-Security SOAP control (APCam / Xiongmai / Goke)."""
+    """Driver for ONVIF SOAP control (APCam / Xiongmai / Goke / NVT).
+
+    Service addresses come from GetCapabilities (e.g. /onvif/Media, /onvif/Ptz) instead of
+    being guessed. Login is WS-Security digest; cameras that reject it but allow anonymous
+    ONVIF (seen on the NVT JA-A1A) are retried without the header, and that is remembered."""
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -341,10 +345,15 @@ class ONVIFSoapDriver:
         self.user = cfg.get("username", "admin")
         self.password = cfg.get("password", "")
         self.speed = 0.5
-        self.endpoint = f"http://{self.host}:{self.port}/onvif/device_service"
+        base = f"http://{self.host}:{self.port}/onvif"
+        self.endpoint = f"{base}/device_service"
+        self.xaddr = {"device": self.endpoint, "media": self.endpoint, "ptz": self.endpoint}
         self.profile_token = cfg.get("onvif_profile", "Profile_1")
         self.last_error = None   # why the last SOAP call failed, e.g. "400 NotAuthorized"
         self.auth_ok = False     # True once GetProfiles succeeded
+        self.auth_mode = "wsse"  # "wsse" or "none" (camera accepts calls without login)
+        self.has_ptz = False
+        self._discover_services()
         self._discover_profile()
 
     def _build_wsse_header(self) -> str:
@@ -364,50 +373,59 @@ class ONVIFSoapDriver:
             </wsse:UsernameToken>
         </wsse:Security>"""
 
-    def _post_soap(self, body_xml: str, timeout: float = 2.5):
-        header = self._build_wsse_header()
-        soap_env = f"""<?xml version="1.0" encoding="utf-8"?>
+    def _envelope(self, body_xml: str, with_auth: bool) -> bytes:
+        header = f"<s:Header>{self._build_wsse_header()}</s:Header>" if with_auth else ""
+        return f"""<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
             xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
             xmlns:tt="http://www.onvif.org/ver10/schema"
             xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
-    <s:Header>{header}</s:Header>
+    {header}
     <s:Body>{body_xml}</s:Body>
-</s:Envelope>"""
+</s:Envelope>""".encode("utf-8")
 
+    def _post_soap(self, body_xml: str, timeout: float = 2.5, service: str = "ptz"):
+        url = self.xaddr.get(service, self.endpoint)
         headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
-        endpoints_to_try = [
-            self.endpoint,
-            f"http://{self.host}:{self.port}/onvif/ptz_service"
-        ]
-
-        for url in endpoints_to_try:
+        modes = [True, False] if self.auth_mode == "wsse" else [False]
+        for with_auth in modes:
             try:
-                res = requests.post(url, data=soap_env.encode("utf-8"), headers=headers, timeout=timeout)
-                if res.status_code == 200:
-                    self.endpoint = url
-                    self.last_error = None
-                    return res
-                fault = re.findall(r"<[\w-]*:?Value>\s*[\w-]+:(\w+)\s*</", res.text)
-                self.last_error = f"{res.status_code} {fault[-1] if fault else ''}".strip()
-                if res.status_code in [400, 415]:
-                    h11 = {"Content-Type": "text/xml; charset=utf-8"}
-                    res11 = requests.post(url, data=soap_env.encode("utf-8"), headers=h11, timeout=timeout)
-                    if res11.status_code == 200:
-                        self.endpoint = url
-                        return res11
+                res = requests.post(url, data=self._envelope(body_xml, with_auth), headers=headers, timeout=timeout)
             except Exception as e:
-                self.last_error = self.last_error or type(e).__name__
+                self.last_error = type(e).__name__
+                return None
+            if res.status_code == 200:
+                self.last_error = None
+                if not with_auth and self.auth_mode != "none":
+                    self.auth_mode = "none"   # login rejected but anonymous works: stop sending it
+                return res
+            fault = re.findall(r"<[\w-]*:?Value>\s*[\w-]+:(\w+)\s*</", res.text)
+            self.last_error = f"{res.status_code} {fault[-1] if fault else ''}".strip()
+            if "NotAuthorized" not in res.text:
+                break                         # a real error, not a login problem
         return None
 
+    def _discover_services(self):
+        """Reads Media and PTZ service addresses (GetCapabilities is usually allowed without login)."""
+        body = "<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>"
+        res = self._post_soap(body, service="device")
+        if not res:
+            return
+        for svc, tag in (("media", "Media"), ("ptz", "PTZ")):
+            m = re.search(rf"<[\w]*:?{tag}>\s*<[\w]*:?XAddr>([^<]+)<", res.text)
+            if m:
+                self.xaddr[svc] = m.group(1).strip()
+        self.has_ptz = bool(re.search(r"<[\w]*:?PTZ>\s*<[\w]*:?XAddr>", res.text))
+
     def _discover_profile(self):
-        body = "<trt:GetProfiles/>"
-        res = self._post_soap(body)
+        res = self._post_soap("<trt:GetProfiles/>", service="media")
         if res and res.status_code == 200:
             self.auth_ok = True
-            tokens = re.findall(r'token="([^"]+)"', res.text)
-            if not tokens:
-                tokens = re.findall(r"<trt:token>([^<]+)</trt:token>", res.text)
+            # Profile tokens only (not the nested configuration tokens); prefer one with PTZ.
+            profiles = re.findall(r'<[\w]*:?Profiles[^>]*token="([^"]+)"(.*?)</[\w]*:?Profiles>', res.text, re.S)
+            with_ptz = [t for t, inner in profiles if "PTZConfiguration" in inner]
+            tokens = with_ptz or [t for t, _ in profiles]
             if tokens:
                 self.profile_token = tokens[0]
                 return
@@ -423,10 +441,10 @@ class ONVIFSoapDriver:
                 root = ET.fromstring(res.text)
                 for elem in root.iter():
                     tag = elem.tag.split("}")[-1].lower()
-                    if tag == "pantilt":
+                    if tag == "pantilt" and "x" in elem.attrib:
                         coords["x"] = float(elem.attrib.get("x", coords["x"]))
                         coords["y"] = float(elem.attrib.get("y", coords["y"]))
-                    elif tag == "zoom":
+                    elif tag == "zoom" and "x" in elem.attrib:
                         coords["z"] = float(elem.attrib.get("x", coords["z"]))
                     elif tag == "movestatus" and "moving" in "".join(elem.itertext()).lower():
                         is_moving = True
@@ -441,21 +459,17 @@ class ONVIFSoapDriver:
         if direction == "stop":
             return self.stop()
 
-        x, y = 0.0, 0.0
-        if direction == "left":
-            x = -speed
-        elif direction == "right":
-            x = speed
-        elif direction == "up":
-            y = speed
-        elif direction == "down":
-            y = -speed
-
+        moves = {"left": ("pt", -speed, 0.0), "right": ("pt", speed, 0.0),
+                 "up": ("pt", 0.0, speed), "down": ("pt", 0.0, -speed),
+                 "zoom_in": ("z", speed, 0.0), "zoom_out": ("z", -speed, 0.0)}
+        if direction not in moves:
+            self.last_error = f"{direction} not supported over ONVIF"
+            return False
+        kind, a, b = moves[direction]
+        vel = f'<tt:PanTilt x="{a}" y="{b}"/>' if kind == "pt" else f'<tt:Zoom x="{a}"/>'
         body = f"""<tptz:ContinuousMove>
             <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
-            <tptz:Velocity>
-                <tt:PanTilt x="{x}" y="{y}"/>
-            </tptz:Velocity>
+            <tptz:Velocity>{vel}</tptz:Velocity>
         </tptz:ContinuousMove>"""
         res = self._post_soap(body)
         return res is not None and res.status_code == 200
@@ -728,8 +742,23 @@ def test_control(cfg: dict, report: dict) -> str:
     name = cfg["name"]
     proto = cfg["ptz_protocol"]
     if proto in ("none", "off", "no"):
-        log(name, "ptz none (from camera JSON)")
-        report["ptz"] = {"protocol": "none"}
+        # Still look: cheap cameras often have ONVIF PTZ even when the JSON says none.
+        found = None
+        if cfg["vendor"] != "dahua":
+            try:
+                probe = ONVIFSoapDriver({**cfg, "ptz_protocol": "onvif_soap"})
+                if probe.auth_ok and probe.has_ptz:
+                    found = probe
+            except Exception:
+                pass
+        if found:
+            log(name, f"ptz none in JSON, but camera has ONVIF PTZ (profile {found.profile_token}, "
+                      f"login {found.auth_mode}); set ptz_protocol to onvif_soap to use it")
+            report["ptz"] = {"protocol": "none", "onvif_ptz_available": True,
+                             "profile": found.profile_token, "auth_mode": found.auth_mode}
+        else:
+            log(name, "ptz none (from camera JSON)")
+            report["ptz"] = {"protocol": "none"}
         return "none"
     drv = build_driver(cfg)
     if isinstance(drv, DahuaCGIDriver):
@@ -739,10 +768,15 @@ def test_control(cfg: dict, report: dict) -> str:
         report["ptz"] = {"protocol": "dahua_cgi", "ok": ok, "status": coords}
         log(name, f"ptz dahua_cgi {'OK' if ok else 'FAIL'}" + (f" pan {coords['x']} tilt {coords['y']}" if ok else ""))
         return "dahua_cgi" if ok else proto
-    ok = drv.auth_ok
+    ok = drv.auth_ok and drv.has_ptz
     report["ptz"] = {"protocol": "onvif_soap", "ok": ok, "profile": drv.profile_token,
-                     "error": drv.last_error}
-    log(name, f"ptz onvif {'OK profile ' + drv.profile_token if ok else 'FAIL ' + str(drv.last_error)}")
+                     "auth_mode": drv.auth_mode, "services": drv.xaddr, "error": drv.last_error}
+    if ok:
+        note = " (camera rejects the login but allows ONVIF without one)" if drv.auth_mode == "none" else ""
+        log(name, f"ptz onvif OK profile {drv.profile_token}{note}")
+    else:
+        why = "no PTZ service" if drv.auth_ok else str(drv.last_error)
+        log(name, f"ptz onvif FAIL {why}")
     return proto
 
 
@@ -796,7 +830,7 @@ def build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, repo
                           f"set GOP to {int(round(main['fps']))} on the camera")
         if sub is main:
             issues.append("only one stream size found; sub stream = main stream")
-    if not copy_ok:
+    if copy_ok is False:
         issues.append("stream-copy record test failed")
     if ptz_protocol not in ("none",) and not report.get("ptz", {}).get("ok"):
         issues.append(f"{ptz_protocol} login failed (check the ONVIF/HTTP user and password)")
@@ -825,7 +859,7 @@ def run_camera_test(target: str, copy_seconds: int) -> int:
         e = encoder["main"]
         log(name, f"encoder main {e.get('Compression')} {e.get('Width')}x{e.get('Height')} "
                   f"{e.get('FPS')}fps gop{e.get('GOP')} {e.get('BitRateControl')} {e.get('BitRate')}kbps")
-    copy_ok = False
+    copy_ok = None if copy_seconds <= 0 else False   # None = skipped, not failed
     if main and copy_seconds > 0:
         copy_ok = copy_test(cfg, main["path"], copy_seconds, report)
         if not copy_ok:

@@ -142,21 +142,33 @@ def ptz(cam, action, speed=None, preset=None):
     return {"ok": ok, "error": None if ok else err, **extra}
 
 
-def snapshot(cam, which):
-    """One JPEG frame from the main or sub stream (ffmpeg, like the copy test)."""
+def snapshot(cam, which, encoder=None):
+    """One up-to-date JPEG frame from the main or sub stream (ffmpeg, like the copy test)."""
+    fresh_cam = {"_encoder": encoder or {}}
     cfg = tp.standardize_config(cam)
     if "main_stream_subtype" in cam or cfg["vendor"] == "dahua":
         st = cam.get("sub_stream_subtype", 1) if which == "sub" else cam.get("main_stream_subtype", 0)
         path = f"/cam/realmonitor?channel={cfg['channel']}&subtype={st}"
     else:
         path = cam.get("sub_stream_path" if which == "sub" else "main_stream_path") or "/live/ch0"
-    cmd = ["ffmpeg", "-v", "error", "-rtsp_transport", "tcp", "-timeout", "5000000",
-           "-i", tp.rtsp_url(cfg, path), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
-           "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
-    r = subprocess.run(cmd, capture_output=True, timeout=20)
-    if r.returncode != 0 or not r.stdout:
+    # The first frame a camera sends is its last keyframe, which can be several seconds old
+    # (livingroom: keyframe every 6 s). So read one keyframe interval and keep the last frame.
+    enc = fresh_cam.get("_encoder", {})
+    fps = float(enc.get("fps") or 0) or 15.0
+    gop = float(enc.get("gop_keyframe_interval") or 0) or fps
+    read_s = min(8.0, max(0.5, gop / fps + 0.5))
+    tmp = os.path.join(tp.OUT_DIR, f"_snap_{cfg['name']}.jpg")
+    os.makedirs(tp.OUT_DIR, exist_ok=True)
+    cmd = ["ffmpeg", "-v", "error", "-y", "-rtsp_transport", "tcp", "-timeout", "5000000",
+           "-i", tp.rtsp_url(cfg, path), "-t", f"{read_s:.1f}", "-an", "-vf", "scale='min(1280,iw)':-2",
+           "-update", "1", "-q:v", "4", tmp]
+    r = subprocess.run(cmd, capture_output=True, timeout=30)
+    if not os.path.isfile(tmp):
         raise RuntimeError(tp.mask(r.stderr.decode(errors="ignore").strip()[-200:], cfg) or "no frame")
-    return r.stdout
+    with open(tmp, "rb") as f:
+        data = f.read()
+    os.remove(tmp)
+    return data
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -213,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/ptz":
                 return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset")))
             if u.path == "/api/snapshot":
-                return self._send(200, snapshot(b["camera"], b.get("which", "sub")), "image/jpeg")
+                return self._send(200, snapshot(b["camera"], b.get("which", "sub"), b.get("encoder")), "image/jpeg")
             return self._send(404, {"error": "not found"})
         except Exception as e:
             return self._send(400, {"error": f"{type(e).__name__}: {e}"})

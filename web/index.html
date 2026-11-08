@@ -444,7 +444,8 @@ async function refreshSnap() {
   if (!current) return;
   const box = $("snap"); if (!box.querySelector("img")) box.textContent = "loading…";
   try {
-    const blob = await api("/api/snapshot", { camera: camNow(), which: $("snapWhich").value });
+    let encoder = {}; try { encoder = readForm().stream_encoder_properties || {}; } catch {}
+    const blob = await api("/api/snapshot", { camera: camNow(), which: $("snapWhich").value, encoder });
     const url = URL.createObjectURL(blob);
     const img = new Image(); img.alt = "camera picture";
     img.onload = () => {
