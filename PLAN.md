@@ -85,16 +85,19 @@ the floating window: picture, zones / ROI, OSD, the PTZ pad and the **points of 
 preset). The JSON's file name is decided by `camera.site` and `camera.name`: `<site>_<camera>.json`
 (e.g. `hub_gate.json`), the same name on the edge and on central.
 
-## On-screen display (OSD): date top left, camera name top middle
+## On-screen display (OSD): title = camera ID, date format
 
-`osd.py`; the camera JSON's `osd` section (not read by multy.py):
-`show_date`, `date_format` (default `dd-MM-yyyy HH:mm:ss`), `date_position` (top-left corner, share of
-the picture, default `0.02, 0.03`), `show_name`, `name_text` (blank = camera name), `name_position`
-(top middle point, default `0.5, 0.03` = centred). In the View window: **Place date** / **Place name**
-(click on the picture), **Read OSD** (from the camera), **Apply OSD** (to the camera; read back after).
-Dahua: configManager VideoWidget / ChannelTitle / Locales.TimeFormat. ONVIF: Media GetOSDs / SetOSD /
-CreateOSD / DeleteOSD; a camera that refuses `dd-MM-yyyy` gets `dd/MM/yyyy` (logged). Tested only
-against simulated cameras so far.
+`osd.py`, **Apply OSD** in the View window:
+- **Title** = the camera ID `<site>_<camera>` from `camera.site` + `camera.name` (e.g. `hub_gate`, no
+  spaces), the same name as the JSON file `hub_gate.json`. Replaces the camera's default ("IPC Camera").
+- **Date format** = `osd.date_format` (the only OSD field; default `dd-MM-yyyy HH:mm:ss`). ONVIF has no
+  `dd-MM-yyyy`: a camera that refuses it gets `dd/MM/yyyy` (logged).
+- **Positions stay as the camera has them.** Read OSD (also when the View opens) shows them on the
+  picture with the recommendation (date top left, title top middle). Only if one covers something:
+  **Move date / Move title** (dashed), saved as `osd.date_position` / `osd.title_position`, sent with
+  the next Apply OSD.
+Dahua: ChannelTitle[ch].Name, Locales.TimeFormat, VideoWidget rectangles (only when moved). ONVIF:
+GetOSDs / SetOSD / CreateOSD, keeping each OSD's own position element. Tested on simulated cameras.
 
 ## Config page (`web_ui.py`)
 

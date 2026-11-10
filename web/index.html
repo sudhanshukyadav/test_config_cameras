@@ -117,6 +117,8 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 .mk .no { font-family: ui-monospace, Consolas, monospace; width: 28px; color: var(--muted); }
 .mk .nm { flex: 1; min-width: 50px; padding: 3px 6px; font-size: 12px; }
 .mk button { padding: 3px 9px; font-size: 12px; }
+.osdline { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.osdline b { color: var(--text); font-weight: 600; }
 .legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .legend b.z { color: #e5534b; } .legend b.r { color: #4c8dff; } .legend b.o { color: #d4a72c; }
 .status { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
@@ -196,12 +198,13 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
     <button id="btnDrawRoi" title="Draw ROI: drag on the picture to set the only area watched (turns on use_roi)">ROI</button>
     <button id="btnClearZones" title="Clear zones and ROI">Clear</button>
     <span style="width:6px"></span>
-    <button id="btnPlaceDate" title="Place date: click on the picture where the date should start (its top-left corner)">Date</button>
-    <button id="btnPlaceName" title="Place name: click on the picture where the name should be (its top middle)">Name</button>
-    <button id="btnReadOsd" title="Read the date / name settings from the camera into the osd fields">Read OSD</button>
-    <button id="btnApplyOsd" class="primary" title="Send the osd fields to the camera">Apply OSD</button>
+    <button id="btnReadOsd" title="Read the camera's title, date format and positions (shown on the picture)">Read OSD</button>
+    <button id="btnApplyOsd" class="primary" title="Set the camera's title to the camera ID and its date format (positions only if you moved them)">Apply OSD</button>
+    <button id="btnPlaceDate" title="Only if the date covers something: click where the date should start (its top-left corner)">Move date</button>
+    <button id="btnPlaceName" title="Only if the title covers something: click where the title should be (its top middle)">Move title</button>
   </div>
-  <div class="legend" title="Drawing and placing change the motion / osd fields; Save to out/ keeps them."><b class="z">red</b> exclude zones · <b class="r">blue</b> ROI · <b class="o">yellow</b> date / name</div>
+  <div class="osdline" id="osdLine">OSD: title = camera ID, date format from the osd tab. Recommended: date top left, title top middle; move only if one covers something.</div>
+  <div class="legend" title="Drawing and placing change the motion / osd fields; Save to out/ keeps them."><b class="z">red</b> exclude zones · <b class="r">blue</b> ROI · <b class="o">yellow</b> OSD now (dashed = moved, sent with Apply OSD)</div>
   </div>
   <div class="vright">
   <div class="ptzbox" id="ptzCard">
@@ -260,12 +263,7 @@ let TEMPLATE = null;  // default JSON from the server; missing keys are filled f
 
 // What each key does. "*" = not read by edge_worker's multy.py (kept for reference / future use).
 const HINTS = {
-  "osd.show_date": "* date and time on the picture",
-  "osd.date_format": "* e.g. dd-MM-yyyy HH:mm:ss (some cameras only offer their own formats)",
-  "osd.date_position": "* top-left corner of the date: x, y as share of the picture (0, 0 = top left)",
-  "osd.show_name": "* camera name on the picture",
-  "osd.name_text": "* blank = the camera's name",
-  "osd.name_position": "* top-middle point of the name: x, y (0.5 = centred)",
+  "osd.date_format": "* date / time format shown on the picture; default dd-MM-yyyy HH:mm:ss (some cameras only take their own formats)",
   "camera.name": "camera name in logs and folders",
   "camera.site": "* site (location) of the camera, e.g. HUB: the file is saved as site_camera.json",
   "camera.vendor": "dahua = Dahua RTSP/CGI paths; generic = stream paths below",
@@ -307,7 +305,7 @@ const HINTS = {
 const SECTION_HINTS = {
   sensor_hardware_properties: "* Picture settings on the camera. Not read by multy.py; not yet pushed to the camera.",
   face_quality: "* Not read by multy.py.",
-  osd: "* On-screen display burned into the video by the camera. Not read by multy.py: set it with Place date / Place name and Apply OSD in the View window.",
+  osd: "* On-screen display burned into the video. The title is always the camera ID (site_camera); only the date format is set here. Apply OSD in the View window sends both; the camera keeps its positions unless you move one there.",
 };
 
 function withDefaults(json) {
@@ -365,7 +363,8 @@ const BASE = location.pathname.startsWith("/cameras") ? "/cameras" : "";
   addEventListener("resize", keepInside);
   $("btnViewClose").onclick = () => { win.hidden = true; stopAll(); };
   $("btnView").onclick = () => { win.hidden = false; keepInside(); setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
-    if (current && !document.querySelector(".snap img")) refreshSnap(); };
+    if (current && !document.querySelector(".snap img")) refreshSnap();
+    if (current && !OSD.read && camNow()?.host) osdCall("read"); else osdSummary(); };
 })();
 if (BASE) $("backLive").hidden = false;    // back to the local site's Latest Happenings
 // Opened through the local site: offer its site names for camera.site
@@ -410,6 +409,10 @@ async function openConfig(where, file) {
 
 function setCurrent(c) {
   c.json = withDefaults(c.json);
+  // OSD section holds only the date format; positions saved earlier (moved) come back as moved
+  const o = c.json.osd || {};
+  OSD = { cam: {}, read: false, moved: Object.fromEntries(["date_position", "title_position"].filter(k => Array.isArray(o[k])).map(k => [k, o[k]])) };
+  c.json.osd = { date_format: o.date_format || "dd-MM-yyyy HH:mm:ss" };
   current = c;
   $("fname").value = c.file;
   const cam = c.json.camera || {};
@@ -442,19 +445,28 @@ function buildForm(json, report) {
   showTab(TAB_NOW in json ? TAB_NOW : Object.keys(json)[0]);
   document.getElementById("f_camera_site")?.setAttribute("list", "siteList");
 }
+// OSD: camera's current title / date format / positions (Read OSD) and positions you moved (only those are saved)
+let OSD = { cam: {}, moved: {}, read: false };
+function cameraId() {
+  const site = slug(document.getElementById("f_camera_site")?.value), name = slug(document.getElementById("f_camera_name")?.value);
+  return site && name ? `${site}_${name}` : name || site || "camera";
+}
 // The JSON's file name is decided by the camera's site and name: <site>_<camera>.json (e.g. hub_gate.json)
 const slug = (v) => String(v || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
 function updateFileName() {
   const site = slug(document.getElementById("f_camera_site")?.value), name = slug(document.getElementById("f_camera_name")?.value);
   if (!name) return;
-  $("fname").value = (site ? `${site}_${name}` : name) + ".json";
+  $("fname").value = cameraId() + ".json";
   const cam = document.getElementById("f_camera_host")?.value || "";
   $("who").textContent = `${document.getElementById("f_camera_name")?.value || "?"} · ${cam || "no host"} · ${$("fname").value}`;
   $("viewWho").textContent = `${document.getElementById("f_camera_name")?.value || "?"} · ${cam}`;
   drawOverlay();
   if (!site) $("fname").title = "Give camera.site to get site_camera.json"; else $("fname").title = "site_camera.json";
 }
-document.addEventListener("input", (e) => { if (e.target.id === "f_camera_site" || e.target.id === "f_camera_name") updateFileName(); });
+document.addEventListener("input", (e) => {
+  if (e.target.id === "f_camera_site" || e.target.id === "f_camera_name") updateFileName();
+  if (["f_camera_site", "f_camera_name", "f_osd_date_format"].includes(e.target.id)) { drawOverlay(); osdSummary(); }
+});
 // Parameters: one section at a time (tabs), so the page fits one screen
 let TAB_NOW = "camera";
 const TAB_NAMES = { sensor_hardware_properties: "sensor", stream_encoder_properties: "encoder", face_quality: "face" };
@@ -514,6 +526,9 @@ function readForm() {
     else v = el.value;
     if (key === "") out[section] = v; else out[section][key] = v;
   }
+  // OSD: only the date format, plus positions you moved because something was covered
+  out.osd = { date_format: (out.osd && out.osd.date_format) || "dd-MM-yyyy HH:mm:ss" };
+  for (const k of ["date_position", "title_position"]) if (OSD.moved[k]) out.osd[k] = OSD.moved[k];
   // PTZ markers are the camera's points of interest: the central server reads their names from "presets"
   const mk = out.camera && out.camera.ptz_markers;
   if (mk && typeof mk === "object" && Object.keys(mk).length) out.presets = mk;
@@ -757,26 +772,21 @@ function drawOverlay() {
   if (fld("use_roi")?.checked && roiNow()) rect(roiNow(), "#4c8dff", "rgba(76,141,255,.10)");
   zonesNow().forEach(z => Array.isArray(z) && z.length === 4 && rect(z, "#e5534b", "rgba(229,83,75,.28)"));
   if (dragStart && dragNow) rect(norm(dragStart, dragNow), drawMode === "roi" ? "#4c8dff" : "#e5534b", "rgba(255,255,255,.15)");
-  // OSD: where the date (top-left corner) and the name (top middle) will be
-  const ofl = (k) => document.getElementById(`f_osd_${k}`);
-  const pt = (k) => { const v = (ofl(k)?.value || "").split(",").map(Number); return v.length === 2 && v.every(n => !isNaN(n)) ? v : null; };
+  // OSD: where the camera shows the date / title now (from Read OSD), or where you moved them (dashed)
   g.font = "bold 13px system-ui, sans-serif"; g.textBaseline = "top";
-  const label = (x, y, text, centre) => {
-    const tw = g.measureText(text).width + 10, px = centre ? x * w - tw / 2 : x * w, py = y * h;
+  const label = (p, text, centre, moved) => {
+    const [x, y] = p, tw = g.measureText(text).width + 10, px = centre ? x * w - tw / 2 : x * w, py = y * h;
     g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(px, py, tw, 20);
-    g.strokeStyle = "#d4a72c"; g.strokeRect(px, py, tw, 20);
+    g.strokeStyle = "#d4a72c"; g.setLineDash(moved ? [5, 3] : []); g.strokeRect(px, py, tw, 20); g.setLineDash([]);
     g.fillStyle = "#ffd866"; g.fillText(text, px + 5, py + 4);
   };
-  if (ofl("show_date")?.checked && pt("date_position")) {
-    const [x, y] = pt("date_position"), n = new Date(), p2 = (v) => String(v).padStart(2, "0");
-    const shown = (ofl("date_format")?.value || "dd-MM-yyyy HH:mm:ss")
-      .replace(/yyyy|MM|dd|HH|mm|ss/g, t => ({ yyyy: n.getFullYear(), MM: p2(n.getMonth() + 1), dd: p2(n.getDate()),
-                                             HH: p2(n.getHours()), mm: p2(n.getMinutes()), ss: p2(n.getSeconds()) }[t]));
-    label(x, y, shown, false);
-  }
-  if (ofl("show_name")?.checked && pt("name_position")) {
-    const [x, y] = pt("name_position"); label(x, y, ofl("name_text")?.value || document.getElementById("f_camera_name")?.value || "camera", true);
-  }
+  const n = new Date(), p2 = (v) => String(v).padStart(2, "0");
+  const dateText = (document.getElementById("f_osd_date_format")?.value || "dd-MM-yyyy HH:mm:ss")
+    .replace(/yyyy|MM|dd|HH|mm|ss/g, t => ({ yyyy: n.getFullYear(), MM: p2(n.getMonth() + 1), dd: p2(n.getDate()),
+                                           HH: p2(n.getHours()), mm: p2(n.getMinutes()), ss: p2(n.getSeconds()) }[t]));
+  const dp = OSD.moved.date_position || OSD.cam.date_position, tpos = OSD.moved.title_position || OSD.cam.title_position;
+  if (dp) label(dp, dateText, false, !!OSD.moved.date_position);
+  if (tpos) label(tpos, cameraId(), true, !!OSD.moved.title_position);
 }
 const r3 = (n) => Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000;
 function norm(a, b) { return [r3(Math.min(a[0], b[0])), r3(Math.min(a[1], b[1])), r3(Math.max(a[0], b[0])), r3(Math.max(a[1], b[1]))]; }
@@ -784,10 +794,9 @@ function hookCanvas(cv) {
   const pos = (e) => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) / b.width, (e.clientY - b.top) / b.height]; };
   cv.addEventListener("pointerdown", (e) => {
     if (!drawMode) return; e.preventDefault();
-    if (drawMode === "date" || drawMode === "name") {          // one click places the date / name
-      const [x, y] = pos(e).map(r3), f = document.getElementById(`f_osd_${drawMode}_position`);
-      if (f) { f.value = `${x}, ${y}`; document.getElementById(`f_osd_show_${drawMode}`).checked = true; }
-      setDrawMode(null); drawOverlay(); return;
+    if (drawMode === "date" || drawMode === "name") {          // one click moves the date / title
+      OSD.moved[drawMode === "date" ? "date_position" : "title_position"] = pos(e).map(r3);
+      setDrawMode(null); drawOverlay(); osdSummary(); return;
     }
     cv.setPointerCapture(e.pointerId); dragStart = dragNow = pos(e); });
   cv.addEventListener("pointermove", (e) => { if (dragStart) { e.preventDefault(); dragNow = pos(e); drawOverlay(); } });
@@ -805,15 +814,19 @@ function setDrawMode(m) {
   drawMode = m; document.querySelector(".snap").classList.toggle("drawing", !!m);
   $("btnDrawZone").classList.toggle("sel", m === "zone"); $("btnDrawRoi").classList.toggle("sel", m === "roi");
   $("btnPlaceDate").classList.toggle("sel", m === "date"); $("btnPlaceName").classList.toggle("sel", m === "name");
+  if (m === "date" || m === "name") toast("Click on the picture where the " + (m === "date" ? "date should start" : "title should be (its middle)"));
 }
 $("btnPlaceDate").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "date" ? null : "date"); };
 $("btnPlaceName").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "name" ? null : "name"); };
-function setOsdFields(o) {
-  for (const [k, v] of Object.entries(o || {})) {
-    const f = document.getElementById(`f_osd_${k}`); if (!f) continue;
-    if (f.dataset.type === "bool") f.checked = !!v; else if (Array.isArray(v)) f.value = v.join(", "); else f.value = v;
-  }
-  drawOverlay();
+function osdSummary() {
+  const c = OSD.cam, moved = Object.keys(OSD.moved).length;
+  $("osdLine").innerHTML = (OSD.read
+      ? `Camera now: title <b>${esc(c.title || "?")}</b>, date <b>${esc(c.date_format || "?")}</b>. `
+      : "") + `Apply sets title <b>${esc(cameraId())}</b>, date <b>${esc(document.getElementById("f_osd_date_format")?.value || "dd-MM-yyyy HH:mm:ss")}</b>` +
+    (moved ? `, and the moved position${moved > 1 ? "s" : ""} (<a href="#" id="osdUnmove">undo move</a>)` : "") +
+    ". Recommended: date top left, title top middle; move only if one covers something.";
+  const u = document.getElementById("osdUnmove");
+  if (u) u.onclick = (e) => { e.preventDefault(); OSD.moved = {}; drawOverlay(); osdSummary(); };
 }
 async function osdCall(action) {
   if (!current) return toast("Load a camera first");
@@ -822,8 +835,11 @@ async function osdCall(action) {
   b.disabled = true; b.textContent = action === "apply" ? "Applying…" : "Reading…";
   try {
     const d = await api("/api/osd", { json, action });
-    if (d.osd) setOsdFields(d.osd);
-    $("log").hidden = false; $("log").textContent = `OSD ${action} via ${d.protocol}: ${d.ok ? "OK" : "FAILED"}\n` + (d.log || []).join("\n");
+    if (d.osd) { OSD.cam = d.osd; OSD.read = true; }
+    if (action === "apply" && d.ok) OSD.moved = {};          // now the camera's own positions
+    drawOverlay(); osdSummary();
+    $("log").hidden = false; $("resultBox").open = !d.ok;
+    $("log").textContent = `OSD ${action} via ${d.protocol}: ${d.ok ? "OK" : "FAILED"}\n` + (d.log || []).join("\n");
     toast(d.ok ? (action === "apply" ? "OSD sent to the camera" : "OSD read from the camera") : "OSD " + action + " failed: see the log");
     if (action === "apply" && d.ok) setTimeout(refreshSnap, 1500);
   } catch (e) { toast(e.message); }

@@ -559,9 +559,9 @@ JSON_TEMPLATE = {
         "roi_crop": [0.2, 0.2, 0.8, 0.8], "min_sharpness": 100, "min_brightness": 50,
         "max_brightness": 220},
     "face_quality": {"enabled": True, "min_face_width": 120, "min_face_height": 120},
-    # On-screen display burned into the video by the camera (osd.py pushes it; multy.py does not read it).
-    "osd": {"show_date": True, "date_format": "dd-MM-yyyy HH:mm:ss", "date_position": [0.02, 0.03],
-            "show_name": True, "name_text": "", "name_position": [0.5, 0.03]},
+    # On-screen display burned into the video by the camera (osd.py sets it; multy.py does not read it).
+    # title = camera ID (site_camera, osd.py); positions stay the camera's unless moved (date_position / title_position)
+    "osd": {"date_format": "dd-MM-yyyy HH:mm:ss"},
 }
 SECTION_ORDER = ["camera", "connection", "sensor_hardware_properties",
                  "stream_encoder_properties", "motion", "face_quality", "osd"]
