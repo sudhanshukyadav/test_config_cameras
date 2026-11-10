@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """On-screen display (OSD) of a camera: the title and the date / time burned into the video.
 
-What this tool sets (Apply OSD in the View window):
-  title        = the camera ID: <site>_<camera> from camera.site and camera.name, e.g. hub_gate
-                 (no spaces; the same name as the JSON file hub_gate.json). Replaces the camera's
-                 own default such as "IPC Camera".
-  date format  = osd.date_format in the camera JSON (default dd-MM-yyyy HH:mm:ss)
-  positions    = left as the camera has them. Recommended: date top left, title top middle. Only
-                 when one covers something do you move it (View window: Move date / Move title);
-                 that writes osd.date_position / osd.title_position (share of the picture, 0..1 from
-                 the top left; the title's x is its centre) and Apply OSD sends them too.
-Read OSD shows the camera's current title, date format and positions.
-
-    "osd": {"date_format": "dd-MM-yyyy HH:mm:ss"}            (+ date_position / title_position if moved)
+The camera JSON's "osd" section (OSD panel of the page; sent by Apply OSD / Save to camera and edge):
+    "osd": {"show_date": true, "date_format": "dd-MM-yyyy HH:mm:ss", "date_position": [0.02, 0.03],
+            "show_name": true, "name_position": [0.5, 0.03], "use_camera_positions": true}
+  title (name)  = always the camera ID <site>_<camera> from camera.site and camera.name, e.g. HUB_Gate (spelling kept as typed)
+                  (no spaces; the same name as the JSON file). Replaces the camera's default ("IPC Camera").
+  date_format   = the date / time format (default dd-MM-yyyy HH:mm:ss)
+  use_camera_positions  true (default): the positions are left as the camera has them (the page shows
+                  them after reading the camera); false: date_position / name_position are sent
+                  (share of the picture, 0..1 from the top left; the name's x is its centre).
+  show_date / show_name  date / title shown or not.
+  other_texts_off  true: the camera's other default texts are switched off too (Dahua: the other
+                  VideoWidget titles; ONVIF: every other OSD is deleted), where the camera allows it.
+Read OSD returns the camera's current title, date format and positions.
 
 Two ways to reach a camera:
   Dahua CGI   configManager.cgi: ChannelTitle[ch].Name, Locales.TimeFormat,
@@ -32,17 +33,17 @@ from requests.auth import HTTPDigestAuth
 import test_protocol as tp
 
 DEFAULT_DATE_FORMAT = "dd-MM-yyyy HH:mm:ss"
-RECOMMENDED = {"date_position": [0.02, 0.03], "title_position": [0.5, 0.03]}
+RECOMMENDED = {"date_position": [0.02, 0.03], "name_position": [0.5, 0.03]}
 DAHUA_MAX = 8191
 DATE_W, TEXT_H, CHAR_W = 0.30, 0.05, 0.022       # size estimates (share of the picture) for Dahua rectangles
 
 
 def slug(v) -> str:
-    return re.sub(r"[^a-z0-9_-]+", "_", str(v or "").strip().lower()).strip("_")
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", str(v or "").strip()).strip("_")     # spelling kept as typed
 
 
 def camera_id(cam_json: dict) -> str:
-    """<site>_<camera> (e.g. hub_gate): the OSD title and the JSON file name."""
+    """<site>_<camera> as typed (e.g. HUB_Gate): the OSD title and the JSON file name."""
     cam = cam_json.get("camera") or {}
     site, name = slug(cam.get("site")), slug(cam.get("name"))
     return f"{site}_{name}" if site and name else name or site or "camera"
@@ -59,10 +60,14 @@ def _pos(v):
 
 def settings(cam_json: dict) -> dict:
     o = cam_json.get("osd") or {}
+    own = o.get("use_camera_positions", True) is not False
     return {"title": camera_id(cam_json),
             "date_format": str(o.get("date_format") or DEFAULT_DATE_FORMAT).strip(),
-            "date_position": _pos(o.get("date_position")),      # None = leave as the camera has it
-            "title_position": _pos(o.get("title_position"))}
+            "show_date": o.get("show_date", True) is not False,
+            "show_name": o.get("show_name", True) is not False,
+            "other_off": o.get("other_texts_off") is True,
+            "date_position": None if own else _pos(o.get("date_position")),     # None = leave as the camera has it
+            "title_position": None if own else _pos(o.get("name_position"))}
 
 
 def protocol_of(cam: dict) -> str:
@@ -91,7 +96,7 @@ class _Dahua:
         q = "&".join(f"{quote(k, safe='[].')}={quote(str(v), safe='')}" for k, v in values.items())
         r = requests.get(f"{self.url}?action=setConfig&{q}", auth=self.auth, timeout=5)
         ok = r.status_code == 200 and "OK" in r.text
-        self.log.append(f"Dahua {what}: HTTP {r.status_code} {r.text.strip()[:80]}")
+        self.log.append(f"Dahua {what}: HTTP {r.status_code} {r.text.strip()[:160] or '(empty answer)'}")
         return ok
 
     def read(self) -> dict:
@@ -114,15 +119,28 @@ class _Dahua:
         if tr:
             out["date_position"] = [round(tr[0], 3), round(tr[1], 3)]
         if cr:
-            out["title_position"] = [round((cr[0] + cr[2]) / 2, 3), round(cr[1], 3)]
+            out["name_position"] = [round((cr[0] + cr[2]) / 2, 3), round(cr[1], 3)]
         return out
 
     def apply(self, s: dict) -> bool:
         w = f"VideoWidget[{self.ch}]"
         to = lambda v: int(round(min(1.0, max(0.0, v)) * DAHUA_MAX))  # noqa: E731
-        vals = {f"ChannelTitle[{self.ch}].Name": s["title"],
-                f"{w}.ChannelTitle.EncodeBlend": "true", f"{w}.ChannelTitle.PreviewBlend": "true",
-                f"{w}.TimeTitle.EncodeBlend": "true", f"{w}.TimeTitle.PreviewBlend": "true"}
+        sd, sn = str(s["show_date"]).lower(), str(s["show_name"]).lower()
+        vals = {f"ChannelTitle[{self.ch}].Name": s["title"]}
+        # Every on/off flag the camera has for the date and the title: one per stream on most models
+        # (EncodeBlend = main stream, EncodeBlendExtra1..3 = sub streams, EncodeBlendSnapshot, PreviewBlend).
+        vw = self.get("VideoWidget")
+        blend = re.compile(rf"^table\.(VideoWidget\[{self.ch}\]\.(TimeTitle|ChannelTitle)\.\w*Blend\w*)$")
+        found = 0
+        for k in vw:
+            m = blend.match(k)
+            if m:
+                vals[m.group(1)] = sd if m.group(2) == "TimeTitle" else sn
+                found += 1
+        if not found:              # the camera listed none: the usual names
+            vals.update({f"{w}.ChannelTitle.EncodeBlend": sn, f"{w}.ChannelTitle.PreviewBlend": sn,
+                         f"{w}.TimeTitle.EncodeBlend": sd, f"{w}.TimeTitle.PreviewBlend": sd})
+        self.log.append("on/off flags: " + (", ".join(sorted(k.split(".", 1)[1] for k in vals if "Blend" in k)) or "none"))
         if s["date_position"]:
             dx, dy = s["date_position"]
             vals.update({f"{w}.TimeTitle.Rect[0]": to(dx), f"{w}.TimeTitle.Rect[1]": to(dy),
@@ -133,7 +151,14 @@ class _Dahua:
             n1 = max(0.0, min(1.0 - nw, nx - nw / 2))
             vals.update({f"{w}.ChannelTitle.Rect[0]": to(n1), f"{w}.ChannelTitle.Rect[1]": to(ny),
                          f"{w}.ChannelTitle.Rect[2]": to(n1 + nw), f"{w}.ChannelTitle.Rect[3]": to(ny + TEXT_H)})
-        ok = self.set(vals, "title" + (" + positions" if s["date_position"] or s["title_position"] else ""))
+        if s["other_off"]:      # the camera's other titles (custom texts, logo …): off; privacy masks (Covers) stay
+            pat = re.compile(rf"^table\.(VideoWidget\[{self.ch}\]\.(?!TimeTitle\.|ChannelTitle\.|Covers\[)[\w\[\].]+\.\w*Blend\w*)$")
+            for k in vw:
+                m = pat.match(k)
+                if m:
+                    vals[m.group(1)] = "false"
+        ok = self.set(vals, "title" + (" + positions" if s["date_position"] or s["title_position"] else "")
+                      + (" + other texts off" if s["other_off"] else ""))
         if not self.set({"Locales.TimeFormat": s["date_format"]}, f"date format {s['date_format']}"):
             self.log.append("the camera did not take the date format (title is set)")
         return ok
@@ -204,7 +229,7 @@ class _Onvif:
             elif o["text_type"] == "Plain":
                 out["title_shown"], out["title"] = True, o["plain"]
                 if self.frac_of(o):
-                    out["title_position"] = self.frac_of(o)
+                    out["name_position"] = self.frac_of(o)
         return out
 
     def _position_xml(self, existing, new_frac, recommended):
@@ -226,13 +251,28 @@ class _Onvif:
         op = "SetOSD" if existing else "CreateOSD"
         return self.soap(f"<trt:{op}>{osd}</trt:{op}>", f"{op} {what}") is not None
 
+    def _drop(self, existing, what: str) -> bool:
+        if not existing:
+            return True
+        return self.soap(f"<trt:DeleteOSD><trt:OSDToken>{existing['token']}</trt:OSDToken></trt:DeleteOSD>",
+                         f"DeleteOSD {what}") is not None
+
     def apply(self, s: dict) -> bool:
         cur = self.osds()
         date = next((o for o in cur if o["text_type"] in _DATE_TYPES), None)
         title = next((o for o in cur if o["text_type"] == "Plain"), None)
         plain = s["title"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        ok = self._put(title, self._position_xml(title, s["title_position"], RECOMMENDED["title_position"]),
-                       f"<tt:Type>Plain</tt:Type><tt:PlainText>{plain}</tt:PlainText>", f"title {s['title']}")
+        if s["show_name"]:
+            ok = self._put(title, self._position_xml(title, s["title_position"], RECOMMENDED["name_position"]),
+                           f"<tt:Type>Plain</tt:Type><tt:PlainText>{plain}</tt:PlainText>", f"title {s['title']}")
+        else:
+            ok = self._drop(title, "title")
+        if s["other_off"]:      # every OSD that is not our date or title: deleted
+            for o in cur:
+                if o is not date and o is not title:
+                    ok = self._drop(o, f"other text {o['plain'] or o['text_type'] or o['token']}") and ok
+        if not s["show_date"]:
+            return ok and self._drop(date, "date")
         dfmt, _, tfmt = s["date_format"].partition(" ")
         pos_xml = self._position_xml(date, s["date_position"], RECOMMENDED["date_position"])
         for d in ONVIF_DATE.get(dfmt, [dfmt]):

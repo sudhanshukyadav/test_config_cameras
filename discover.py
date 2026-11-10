@@ -242,7 +242,7 @@ def _dahua_cgi(ip: str, port: int, user: str, password: str):
 # Factory logins tried when none is given (most known cameras keep them). Your own common logins go
 # into default_logins.json next to this file (git-ignored), tried before these:
 #   {"logins": [["admin", "plant-pass"], ["admin", "admin"]], "max_tries": 3}
-DEFAULT_LOGINS = [("admin", ""), ("admin", "admin"), ("admin", "12345")]
+DEFAULT_LOGINS = [("admin", "admin123"), ("admin", ""), ("admin", "admin"), ("admin", "12345")]
 MAX_LOGIN_TRIES = 3     # many cameras lock the login after ~5 wrong passwords (Dahua: 30 min)
 
 
@@ -283,6 +283,46 @@ def _onvif_login(ip: str, port: int, user: str, password: str) -> str:
     return "unknown"
 
 
+def _onvif_anonymous(ip: str, port: int) -> bool:
+    """The camera answers ONVIF without a login (cheap NVT / APCam cameras reject every login but do this)."""
+    body = ('<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Body><tds:GetDeviceInformation/></s:Body></s:Envelope>')
+    try:
+        r = requests.post(f"http://{ip}:{port}/onvif/device_service", data=body.encode(),
+                          headers={"Content-Type": "application/soap+xml; charset=utf-8"}, timeout=4)
+    except requests.RequestException:
+        return False
+    return r.status_code == 200 and "getdeviceinformationresponse" in r.text.lower()
+
+
+def _onvif_stream_path(ip: str, port: int) -> tuple[str, int] | None:
+    """(path, rtsp port) of the camera's first stream, asked over ONVIF without a login."""
+    drv = tp.ONVIFSoapDriver({"name": ip, "host": ip, "http_port": port, "username": "", "password": ""})
+    if not drv.auth_ok:
+        return None
+    pr = drv._post_soap("<trt:GetProfiles/>", service="media")
+    for p in _parse_profiles(pr.text) if pr is not None else []:
+        body = ("<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream>"
+                "<tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>"
+                f"<trt:ProfileToken>{p['token']}</trt:ProfileToken></trt:GetStreamUri>")
+        u = drv._post_soap(body, service="media")
+        m = re.search(r"<[\w]*:?Uri>([^<]+)<", u.text) if u is not None else None
+        if m:
+            uri = urlparse(m.group(1).replace("&amp;", "&"))
+            return uri.path + (f"?{uri.query}" if uri.query else ""), uri.port or 554
+    return None
+
+
+def _rtsp_login(ip: str, port: int, path: str, user: str, password: str) -> str:
+    """One look at the video stream with this login: 'ok', 'bad' or 'unknown'."""
+    info, err = tp.ffprobe_stream(tp.rtsp_url({"host": ip, "port": port, "username": user, "password": password}, path),
+                                  seconds=2, timeout=12)
+    if info:
+        return "ok"
+    e = str(err or "").lower()
+    return "bad" if ("401" in e or "unauthorized" in e or "403" in e) else "unknown"
+
+
 def _dahua_login(ip: str, port: int, user: str, password: str) -> str:
     """One Dahua CGI call with this login: 'ok', 'bad', 'locked' or 'unknown' (not a Dahua)."""
     try:
@@ -306,8 +346,9 @@ def _answers_dahua_cgi(ip: str, port: int) -> bool:
     return r.status_code == 401 or (r.status_code == 200 and "type=" in r.text)
 
 
-def find_login(ip: str, ports=None, onvif_xaddrs=None) -> dict:
-    """Tries the default logins on a camera, one cheap check each, stopping at the first that works.
+def find_login(ip: str, ports=None, onvif_xaddrs=None, first=None) -> dict:
+    """Tries `first` (the login typed on the page), then the default logins, one cheap check each,
+    at most MAX_LOGIN_TRIES in all, stopping at the first that works.
     Returns {login: (user, password) or None, tried, locked, how, note}."""
     hint = [urlparse(x).port or 80 for x in (onvif_xaddrs or [])] + [p for p in (ports or []) if p in ONVIF_PORTS]
     oport = _find_onvif_port(ip, hint)
@@ -321,10 +362,26 @@ def find_login(ip: str, ports=None, onvif_xaddrs=None) -> dict:
         res["note"] = "the camera answers neither ONVIF nor Dahua CGI: give its login"
         return res
     logins, tries = default_logins()
-    for user, password in logins[:tries]:
+    if first:
+        logins = list(dict.fromkeys([tuple(first)] + logins))
+    i = 0
+    while i < min(tries, len(logins)):
+        user, password = logins[i]
+        i += 1
         res["tried"] += 1
         state = check(user, password)
         tp.log(ip, f"default login {res['tried']}/{tries} via {how}: {state}")
+        if state == "bad" and how == "onvif" and _onvif_anonymous(ip, oport):
+            # ONVIF rejects every login but answers without one: check the logins on the video instead
+            sp = _onvif_stream_path(ip, oport)
+            if not sp:
+                res["note"] = "ONVIF answers without a login but gives no stream address: give the camera's login"
+                return res
+            path, rport = sp
+            tp.log(ip, f"ONVIF rejects logins but answers without one; checking the logins on the video {path}")
+            check, how = (lambda u, pw: _rtsp_login(ip, rport, path, u, pw)), "rtsp"
+            res["how"], res["tried"], i = how, 0, 0      # ONVIF's "wrong" counted nothing: start again
+            continue
         if state == "ok":
             res["login"] = (user, password)
             return res
@@ -336,7 +393,7 @@ def find_login(ip: str, ports=None, onvif_xaddrs=None) -> dict:
             res["note"] = f"the camera stopped answering {how}; give its login"
             return res
         time.sleep(1)
-    res["note"] = f"none of the {res['tried']} default logins worked: give the camera's login"
+    res["note"] = f"none of the {res['tried']} logins tried worked: give the camera's login"
     return res
 
 

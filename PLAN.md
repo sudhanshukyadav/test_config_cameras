@@ -77,27 +77,84 @@ which keeps listening on 127.0.0.1:8091 only (service `AISYS-CamSetup`).
 Backlog: find a camera whose IP is lost or outside this network (other subnet, factory default IP)
 and move it into the control network's range.
 
-## Page layout (one screen)
+## The page (Camera config and testing)
 
-Parameters (tabs) fill the page; the test result is folded at the bottom. **View · PTZ · POI** opens
-the floating window: picture, zones / ROI, OSD, the PTZ pad and the **points of interest** (numbered
-01, 02 … automatically, you only type the name; Add stores the camera's current position as that
-preset). The JSON's file name is decided by `camera.site` and `camera.name`: `<site>_<camera>.json`
-(e.g. `hub_gate.json`), the same name on the edge and on central.
+- **Header:** Back · title · camera picker (saved cameras by camera ID) · IP box (starts `192.168.`) +
+  **Identify** (default logins first; login boxes appear only when none works) · **Run test** ·
+  **Save to camera and edge**.
+- **One page of panels:** Camera, Connection, Sensor, Encoder, Motion, Face, OSD and **PTZ · POI**
+  (status: PTZ protocol, last position, the points of interest; **Open view · PTZ · POI**) fit one
+  screen. Agent fields are blue (not explained on the page). **Back** on the view returns here.
+- **Panels** per category fill the page. **Camera ID** = `<site>_<camera>` as typed (e.g. `HUB_Gate`; capitals kept, spaces -> `_`): the
+  file name (`hub_gate.json`, overwritten on save) and the OSD title.
+- **Run test** includes the recording check (10 s recorded the way the edge does, no box). Progress
+  scrolls by in the **status bar** at the bottom; failures and issues stay there in red. The result
+  opens in its own **floating window** and is kept as `out\hub_gate.txt` (overwritten by each test).
+- **Save to camera and edge:** `<id>.json` into **central's base** (`central_storage.mount_path` in
+  central's `pull.json`) and **the site's edge base** (`edge_nodes[].base_path`), overwritten; the only two
+  copies (`out\` keeps the test results). Another camera JSON with the **same camera IP** in either place
+  is deleted and its camera name written to `"replaces"` (central then drops the old camera; its events
+  keep the name); the bottom bar says so when the camera is opened. Then the OSD and the Sensor / Encoder
+  values go to the camera. Every saved JSON says where both copies are:
+  `"storage": {"central_base": <central's folder>, "edge_base": <the edge's folder>}` (as in pull.json).
+  After saving, **central is told** to load that file (NOTIFY `aisys_cameras`)
+  and **the edge is asked** to read its camera files (`cameras.req` in its base; multy.py answers in
+  `cameras.ack`, shown in the bottom bar; Save waits up to 10 s). The camera picker lists central's base.
+- **Identify and its login:** when no login is typed, the login of an existing camera JSON with the same
+  IP is tried first (central's base, the edge bases, `out\`, `..\edge_worker`, e.g. livingroom.json), then
+  the default logins (3 tries in all). Cameras whose ONVIF rejects every login but answers without one
+  (cheap NVT / APCam cameras on port 8899) have their logins checked on the video stream instead
+  (the RTSP address from ONVIF), so the right login is accepted.
+- **Points of interest** are stored with their PTZ position, read from the camera at Add / Set:
+  `"01": {"name": "Door", "pan": .., "tilt": .., "zoom": ..}` in `camera.ptz_markers`; `"presets"` keeps
+  the names. Central fills its `camera_poi` table from them.
+- **OSD panel:** show_date, date_format, date_position, show_name, name_text (= camera ID, not
+  editable), name_position, **use_camera_positions** (ticked: the camera's own positions, read from
+  it and shown greyed; unticked: the two position boxes are sent).
+- **View page:** live picture (fresh frame every 5 s), zones / ROI under it; side panel: **OSD**
+  (use the camera's default positions, show OSD positions on the picture, **Place date / Place
+  title** by clicking the picture, Read OSD, Apply OSD, OSD off), **PTZ** (pad, Zoom + / −, Focus
+  near / far, Autofocus, Lens init, speed, and the position as numbers: Pan, Tilt, Zoom, Focus,
+  read after every stop, POI Go and on opening; ↻ reads it now) and **Points of interest**
+  (01, 02 … automatic; Go / Set / Add act at once, no confirmation). **POI numbers are never
+  reused:** the highest number given is kept as `poi_last` in the camera JSON, so after deleting
+  02 the next one is still 05, not 02. The picture is at most 640 px wide and shrinks so the page
+  fits the screen height.
+- **Panels page:** four columns (Camera · Sensor + Encoder · Motion + Connection · Face + OSD + PTZ · POI)
+  that all end on the same bottom line; ptz_markers in a bigger box; Face: enabled alone, min width and
+  height side by side. **OSD panel:** the ticks in the left column, each with its fields (show_date ->
+  date_format, date_position; show_name -> name_text, name_position; use_camera_positions;
+  other_texts_off; own_overlay -> overlay_date_position, overlay_name_position, overlay_text_size).
+- **Own OSD text** (`osd.own_overlay`, off by default): our own date and title, plain white text,
+  no boxes, with its own ticks for the date (`own_date`) and the title (`own_title`), own positions
+  (default bottom left / bottom middle) and size (`overlay_text_size`, share of
+  the picture height). Independent of the camera's OSD (both may show; a camera that enforces its OSD
+  ignores the camera ticks). On the view: tick "own OSD text"; Place date / Place title move ours while
+  it is on, else the camera's (sent by Apply OSD). Shown on the page now; the edge burning it into
+  snapshots and clips comes with the edge change-over.
+- **View row:** sub stream, Refresh, **live** (ticked: a frame every 5 s and one after each move;
+  unticked: after moves and Refresh only), Exclude zone, ROI, Clear zones, Clear ROI.
+- **Camera settings (`camset.py`):** Save writes the Sensor and Encoder values into the camera, each on
+  its own (Dahua CGI: only the keys the camera lists, all its profiles; ONVIF: Imaging scaled to the
+  camera's ranges, Media encoder: main = first profile, sub = second). Values the camera already has are
+  not rewritten; values it has no setting for are listed as "not adjustable"; refused values and values
+  the camera changed (read back) are alarms. Shutter and gain are the manual-exposure values (exposure
+  mode left as it is, reported). After a resolution / fps / bitrate change: "the camera restarts its
+  stream, the edge reconnects".
+- **Messages:** none in the panels; every message goes to the **bottom bar** with its time.
+  ◀ ▶ step through the history; the alarm count shows only the alarms (click), **clear alarms**
+  removes them.
+- Removed from the page: the left column (Cameras card, Find cameras, New camera), tabs, file box,
+  copy-test box. `discover.py` and `/api/discover` remain for the command line.
 
-## On-screen display (OSD): title = camera ID, date format
+## On-screen display (OSD)
 
-`osd.py`, **Apply OSD** in the View window:
-- **Title** = the camera ID `<site>_<camera>` from `camera.site` + `camera.name` (e.g. `hub_gate`, no
-  spaces), the same name as the JSON file `hub_gate.json`. Replaces the camera's default ("IPC Camera").
-- **Date format** = `osd.date_format` (the only OSD field; default `dd-MM-yyyy HH:mm:ss`). ONVIF has no
-  `dd-MM-yyyy`: a camera that refuses it gets `dd/MM/yyyy` (logged).
-- **Positions stay as the camera has them.** Read OSD (also when the View opens) shows them on the
-  picture with the recommendation (date top left, title top middle). Only if one covers something:
-  **Move date / Move title** (dashed), saved as `osd.date_position` / `osd.title_position`, sent with
-  the next Apply OSD.
-Dahua: ChannelTitle[ch].Name, Locales.TimeFormat, VideoWidget rectangles (only when moved). ONVIF:
-GetOSDs / SetOSD / CreateOSD, keeping each OSD's own position element. Tested on simulated cameras.
+`osd.py`: title = camera ID; date format; positions kept as the camera has them while
+use_camera_positions is ticked. Dahua: ChannelTitle[ch].Name, Locales.TimeFormat, VideoWidget: every
+on/off flag the camera lists for TimeTitle / ChannelTitle (EncodeBlend, EncodeBlendExtra1…, EncodeBlendSnapshot,
+PreviewBlend: one per stream), Rect only for own positions; the flags found are logged. ONVIF: GetOSDs / SetOSD /
+CreateOSD / DeleteOSD (hidden = deleted), each OSD keeps its own position element; a camera that
+refuses `dd-MM-yyyy` gets `dd/MM/yyyy` (shown in red in the status bar). Tested on simulated cameras.
 
 ## Config page (`web_ui.py`)
 

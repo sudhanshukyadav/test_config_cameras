@@ -330,6 +330,12 @@ class DahuaCGIDriver:
         return coords, moving
 
 
+def soap_body(text: str, limit: int = 700) -> str:
+    """The Body of a SOAP answer on one line (the envelope's namespace list left out), for the log."""
+    m = re.search(r"<[\w-]*:?Body[^>]*>(.*)</[\w-]*:?Body>", text or "", re.S)
+    return re.sub(r"\s+", " ", m.group(1) if m else (text or ""))[:limit].strip()
+
+
 class ONVIFSoapDriver:
     """Driver for ONVIF SOAP control (APCam / Xiongmai / Goke / NVT).
 
@@ -385,9 +391,16 @@ class ONVIFSoapDriver:
     <s:Body>{body_xml}</s:Body>
 </s:Envelope>""".encode("utf-8")
 
+    SOAP_NS = {"tptz": "http://www.onvif.org/ver20/ptz/wsdl", "trt": "http://www.onvif.org/ver10/media/wsdl",
+               "tds": "http://www.onvif.org/ver10/device/wsdl", "timg": "http://www.onvif.org/ver20/imaging/wsdl"}
+
     def _post_soap(self, body_xml: str, timeout: float = 2.5, service: str = "ptz"):
         url = self.xaddr.get(service, self.endpoint)
         headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
+        op = re.match(r"\s*<(tptz|trt|tds|timg):(\w+)", body_xml)
+        if op:          # the operation's name (SOAP 1.2 action); some cameras need it to find the operation
+            headers["Content-Type"] += f'; action="{self.SOAP_NS[op.group(1)]}/{op.group(2)}"'
+        self.last_answer = None
         modes = [True, False] if self.auth_mode == "wsse" else [False]
         for with_auth in modes:
             try:
@@ -402,6 +415,7 @@ class ONVIFSoapDriver:
                 return res
             fault = re.findall(r"<[\w-]*:?Value>\s*[\w-]+:(\w+)\s*</", res.text)
             self.last_error = f"{res.status_code} {fault[-1] if fault else ''}".strip()
+            self.last_answer = soap_body(res.text)
             if "NotAuthorized" not in res.text:
                 break                         # a real error, not a login problem
         return None
@@ -412,7 +426,7 @@ class ONVIFSoapDriver:
         res = self._post_soap(body, service="device")
         if not res:
             return
-        for svc, tag in (("media", "Media"), ("ptz", "PTZ")):
+        for svc, tag in (("media", "Media"), ("ptz", "PTZ"), ("imaging", "Imaging")):
             m = re.search(rf"<[\w]*:?{tag}>\s*<[\w]*:?XAddr>([^<]+)<", res.text)
             if m:
                 self.xaddr[svc] = m.group(1).strip()
@@ -436,20 +450,25 @@ class ONVIFSoapDriver:
         is_moving = False
         body = f"<tptz:GetStatus><tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken></tptz:GetStatus>"
         res = self._post_soap(body, timeout=1.5)
+        self.status_raw = None
+        coords["reported"] = False                 # until the camera's answer gives a position
         if res and res.status_code == 200:
-            try:
-                root = ET.fromstring(res.text)
-                for elem in root.iter():
-                    tag = elem.tag.split("}")[-1].lower()
-                    if tag == "pantilt" and "x" in elem.attrib:
-                        coords["x"] = float(elem.attrib.get("x", coords["x"]))
-                        coords["y"] = float(elem.attrib.get("y", coords["y"]))
-                    elif tag == "zoom" and "x" in elem.attrib:
-                        coords["z"] = float(elem.attrib.get("x", coords["z"]))
-                    elif tag == "movestatus" and "moving" in "".join(elem.itertext()).lower():
-                        is_moving = True
-            except Exception:
-                pass
+            # Read with patterns, not an XML parser: cheap cameras send prefixes they never declare.
+            text = res.text
+            pos = re.search(r"<[\w]*:?Position\b.*?</[\w]*:?Position>", text, re.S)
+            part = pos.group(0) if pos else text
+            m = re.search(r'<[\w]*:?PanTilt\b[^>]*?\bx="([-\d.eE+]+)"[^>]*?\by="([-\d.eE+]+)"', part)
+            if m:
+                coords["x"], coords["y"] = float(m.group(1)), float(m.group(2))
+            mz = re.search(r'<[\w]*:?Zoom\b[^>]*?\bx="([-\d.eE+]+)"', part)
+            if mz:
+                coords["z"] = float(mz.group(1))
+            coords["reported"] = bool(m or mz)
+            if not coords["reported"] or not any((coords["x"], coords["y"], coords["z"])):
+                self.status_raw = soap_body(text)                       # for the log: what the camera sent
+            mv = re.search(r"<[\w]*:?MoveStatus>(.*?)</[\w]*:?MoveStatus>", text, re.S)
+            if mv and "moving" in mv.group(1).lower():
+                is_moving = True
         return coords, is_moving
 
     def set_ptz(self, direction: str, speed: float = None) -> bool:
@@ -491,14 +510,37 @@ class ONVIFSoapDriver:
         res = self._post_soap(body)
         return res is not None and res.status_code == 200
 
-    def set_preset(self, preset_id: int) -> bool:
+    def set_preset(self, preset_id, new_name: str | None = None) -> bool:
+        """Stores the current position under preset token `preset_id`. Cameras that refuse a token they
+        did not make get a new preset instead (no token sent); the camera's token is then in
+        self.last_preset_token."""
+        self.last_preset_token = None
         body = f"""<tptz:SetPreset>
             <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:PresetName>{new_name or f"Preset_{preset_id}"}</tptz:PresetName>
             <tptz:PresetToken>{preset_id}</tptz:PresetToken>
-            <tptz:PresetName>Preset_{preset_id}</tptz:PresetName>
         </tptz:SetPreset>"""
         res = self._post_soap(body)
-        return res is not None and res.status_code == 200
+        if res is not None and res.status_code == 200:
+            m = re.search(r"<[\w]*:?PresetToken>([^<]+)<", res.text)
+            self.last_preset_token = m.group(1).strip() if m else str(preset_id)
+            return True
+        first_error = self.last_error
+        body = f"""<tptz:SetPreset>
+            <tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken>
+            <tptz:PresetName>{new_name or f"Preset_{preset_id}"}</tptz:PresetName>
+        </tptz:SetPreset>"""
+        res = self._post_soap(body)
+        if res is not None and res.status_code == 200:
+            m = re.search(r"<[\w]*:?PresetToken>([^<]+)<", res.text)
+            if m:
+                self.last_preset_token = m.group(1).strip()
+                return True
+        self.last_error = first_error or self.last_error
+        self.preset_refusal = self.last_answer
+        lst = self._post_soap(f"<tptz:GetPresets><tptz:ProfileToken>{self.profile_token}</tptz:ProfileToken></tptz:GetPresets>")
+        self.presets_answer = soap_body(lst.text) if lst is not None else f"GetPresets: {self.last_error}"
+        return False
 
     def trigger_autofocus(self) -> bool:
         return False
@@ -560,8 +602,14 @@ JSON_TEMPLATE = {
         "max_brightness": 220},
     "face_quality": {"enabled": True, "min_face_width": 120, "min_face_height": 120},
     # On-screen display burned into the video by the camera (osd.py sets it; multy.py does not read it).
-    # title = camera ID (site_camera, osd.py); positions stay the camera's unless moved (date_position / title_position)
-    "osd": {"date_format": "dd-MM-yyyy HH:mm:ss"},
+    # title = camera ID (site_camera, osd.py); positions stay the camera's while use_camera_positions
+    "osd": {"show_date": True, "date_format": "dd-MM-yyyy HH:mm:ss", "date_position": [0.02, 0.03],
+            "show_name": True, "name_position": [0.5, 0.03], "use_camera_positions": True,
+            "other_texts_off": False,
+            # our own text (not the camera's): optional, off by default; white, own positions and size
+            "own_overlay": False, "own_date": True, "own_title": True,
+            "overlay_date_position": [0.02, 0.92], "overlay_name_position": [0.5, 0.92],
+            "overlay_text_size": 0.04},
 }
 SECTION_ORDER = ["camera", "connection", "sensor_hardware_properties",
                  "stream_encoder_properties", "motion", "face_quality", "osd"]
@@ -855,20 +903,37 @@ def build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, repo
         issues.append("no working RTSP stream")
     else:
         if main["codec"] != "h264":
-            issues.append(f"main stream is {main['codec']}, multy needs H.264")
+            issues.append(f"main stream is {main['codec']}, the edge needs H.264")
         if sub["codec"] != "h264":
-            issues.append(f"sub stream is {sub['codec']}, multy needs H.264")
+            issues.append(f"sub stream is {sub['codec']}, the edge needs H.264")
         if main["gop"] and main["fps"] and main["gop"] > 2 * main["fps"]:
             issues.append(f"keyframe every {main['gop']} frames ({main['gop'] / main['fps']:.1f}s); "
                           f"set GOP to {int(round(main['fps']))} on the camera")
         if sub is main:
             issues.append("only one stream size found; sub stream = main stream")
     if copy_ok is False:
-        issues.append("stream-copy record test failed")
+        issues.append("recording check failed (10 s recorded the way the edge does)")
     if ptz_protocol not in ("none",) and not report.get("ptz", {}).get("ok"):
         issues.append(f"{ptz_protocol} login failed (check the ONVIF/HTTP user and password)")
     report["issues"] = issues
     return {sec: data[sec] for sec in SECTION_ORDER} | {k: v for k, v in data.items() if k not in SECTION_ORDER}
+
+
+LAST_REPORT = None   # the last test's report (for the web page)
+
+
+def report_text(report: dict) -> str:
+    """The test result as plain text (<camera>.txt next to the camera JSON; only the latest is kept)."""
+    out = [f"Camera test {report.get('name', '')} {report.get('host', '')}  {report.get('time', '')}", ""]
+    for s_ in report.get("streams", []) or []:
+        out.append(f"stream {s_.get('path')}: {s_.get('width')}x{s_.get('height')} {s_.get('codec')} "
+                   f"{s_.get('fps')} fps, keyframe every {s_.get('gop', '?')}")
+    ct = report.get("copy_test")
+    if ct:
+        out.append(f"recording check: {'OK' if ct.get('ok') else 'FAILED'} {ct.get('duration')} s, {ct.get('keyframes')} keyframes")
+    issues = report.get("issues") or []
+    out += ["", "Issues:" if issues else "No issues: ready for the edge."] + [f"  - {i}" for i in issues]
+    return "\n".join(out) + "\n"
 
 
 def run_camera_test(target: str, copy_seconds: int) -> int:
@@ -906,8 +971,10 @@ def run_camera_test(target: str, copy_seconds: int) -> int:
     json_path = os.path.join(OUT_DIR, f"{stem}.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
-    with open(os.path.join(OUT_DIR, f"{stem}.report.json"), "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+    with open(os.path.join(OUT_DIR, f"{stem}.txt"), "w", encoding="utf-8") as f:   # overwritten by each test
+        f.write(report_text(report))
+    global LAST_REPORT
+    LAST_REPORT = report
     for issue in report["issues"]:
         log(name, f"ISSUE {issue}")
     log(name, f"wrote {json_path} ({'ready' if not report['issues'] else str(len(report['issues'])) + ' issues'})")

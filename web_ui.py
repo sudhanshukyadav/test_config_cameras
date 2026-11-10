@@ -20,7 +20,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import camset
 import discover as dc
+import osd
 import test_protocol as tp
 
 WEB_DIR = os.path.join(tp.SCRIPT_DIR, "web")
@@ -33,29 +35,76 @@ _watchdogs = {}                    # driver id -> Timer that stops a move nobody
 _snap_locks = {}                   # camera host -> Lock (one picture stream per camera at a time)
 
 
-def list_configs():
-    """Camera JSONs in the config dir (source) and in out/ (generated or saved here)."""
-    items = []
-    for where, folder in (("source", CONFIG_DIR), ("out", tp.OUT_DIR)):
-        if not os.path.isdir(folder):
-            continue
-        for fn in sorted(os.listdir(folder)):
-            if not fn.endswith(".json") or fn.endswith(".report.json"):
-                continue
+# ---- where the camera JSONs live: central's base (made here) and the site's edge base ----------
+def pull_config() -> dict:
+    """The AiSys central pull.json (next to this repo, or in AISYS_CONFIG_DIR)."""
+    for p in (os.path.join(os.environ.get("AISYS_CONFIG_DIR", ""), "pull.json"),
+              os.path.join(tp.SCRIPT_DIR, "..", "aivision", "site", "pull.json")):
+        if p and os.path.isfile(p):
             try:
-                with open(os.path.join(folder, fn), encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
+                with open(p, encoding="utf-8-sig") as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                pass
+    return {}
+
+
+def local_path(raw: str) -> str:
+    """A configured share path as this machine opens it (AISYS_PATH_MAP "raw=local;..." for tests)."""
+    for pair in filter(None, os.environ.get("AISYS_PATH_MAP", "").split(";")):
+        k, _, v = pair.partition("=")
+        if k and raw.lower().startswith(k.lower()):
+            return v + raw[len(k):].replace("\\", "/")
+    return raw
+
+
+def central_base():
+    raw = ((pull_config().get("central_storage") or {}).get("mount_path") or "").strip()
+    return local_path(raw) if raw else None
+
+
+def edge_shares() -> dict:
+    """site (upper case) -> the edge's base folder, from pull.json."""
+    return {str(n.get("site_name", "")).upper(): local_path(n.get("base_path"))
+            for n in pull_config().get("edge_nodes", []) if n.get("site_name") and n.get("base_path")}
+
+
+def _camera_jsons(folder):
+    """[(file name, JSON)] of the camera JSONs (with a camera section) in a folder."""
+    out = []
+    for fn in sorted(os.listdir(folder)):
+        if not fn.lower().endswith(".json") or fn.endswith(".report.json"):
+            continue
+        try:
+            with open(os.path.join(folder, fn), encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(data, dict) and isinstance(data.get("camera"), dict):
+            out.append((fn, data))
+    return out
+
+
+def list_configs():
+    """Camera JSONs in central's base; older ones still in out/ are listed too (Save moves them)."""
+    items, seen = [], set()
+    for where, folder in (("central", central_base()), ("out", tp.OUT_DIR)):
+        if not folder or not os.path.isdir(folder):
+            continue
+        for fn, data in _camera_jsons(folder):
+            if fn.lower() in seen:
                 continue
-            if isinstance(data, dict) and isinstance(data.get("camera"), dict):
-                cam = data["camera"]
-                items.append({"where": where, "file": fn, "name": cam.get("name", fn[:-5]),
-                              "host": cam.get("host"), "ptz": cam.get("ptz_protocol", "")})
+            seen.add(fn.lower())
+            cam = data["camera"]
+            items.append({"where": where, "file": fn, "id": fn[:-5], "name": cam.get("name", fn[:-5]),
+                          "host": cam.get("host"), "ptz": cam.get("ptz_protocol", "")})
     return items
 
 
 def config_path(where, fn):
-    folder = CONFIG_DIR if where == "source" else tp.OUT_DIR
+    folder = central_base() if where == "central" else CONFIG_DIR if where == "source" else tp.OUT_DIR
+    if not folder:
+        raise ValueError("central base unknown (central_storage.mount_path in pull.json)")
     fn = os.path.basename(fn)               # no paths from the page
     if not fn.endswith(".json"):
         raise ValueError("not a .json file")
@@ -63,6 +112,7 @@ def config_path(where, fn):
 
 
 def save_out(fn, data):
+    """The test's working copy (out/); removed again after the test."""
     if not isinstance(data, dict) or not isinstance(data.get("camera"), dict):
         raise ValueError("JSON needs a camera section")
     os.makedirs(tp.OUT_DIR, exist_ok=True)
@@ -72,26 +122,202 @@ def save_out(fn, data):
     return path
 
 
-def run_test(fn, data, copy_seconds):
-    """Saves the page's JSON to out/, tests the camera from it, returns log + new JSON + report."""
+COPY_SECONDS = 10        # recording check inside Run test: this many seconds recorded like the edge does
+_progress = {"lines": [], "running": False, "cam": {}}
+
+
+class _Progress(io.StringIO):
+    """Captures the test's output and keeps finished lines for /api/test/progress."""
+    def __init__(self):
+        super().__init__()
+        self._part = ""
+
+    def write(self, text):
+        self._part += text
+        while "\n" in self._part:
+            line, self._part = self._part.split("\n", 1)
+            if line.strip():
+                _progress["lines"].append(line)
+        return super().write(text)
+
+
+def camera_file(data) -> str:
+    """<site>_<camera>.json: the file name always follows from camera.site and camera.name."""
+    return osd.camera_id(data) + ".json"
+
+
+def run_test(data, copy_seconds=COPY_SECONDS):
+    """Saves the page's JSON to out/, tests the camera from it, returns log + new JSON + result text.
+    The result is kept as out/<site>_<camera>.txt (overwritten by each test)."""
+    fn = camera_file(data)
     path = save_out(fn, data)
-    buf = io.StringIO()
-    with _test_lock, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+    buf = _Progress()
+    with _test_lock:
+        _progress.update(lines=[], running=True, cam=tp.standardize_config(data["camera"]))
+        tp.LAST_REPORT = None
         try:
-            code = tp.run_camera_test(path, int(copy_seconds))
-        except SystemExit as e:
-            code = e.code
-        except Exception as e:  # keep the server up, show the error on the page
-            print(f"ERROR {type(e).__name__}: {e}")
-            code = 1
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                try:
+                    code = tp.run_camera_test(path, int(copy_seconds))
+                except SystemExit as e:
+                    code = e.code
+                except Exception as e:  # keep the server up, show the error on the page
+                    print(f"ERROR {type(e).__name__}: {e}")
+                    code = 1
+        finally:
+            _progress["running"] = False
     stem = os.path.splitext(fn)[0]
-    out = {"code": code, "log": tp.mask(buf.getvalue(), tp.standardize_config(data["camera"]))}
-    for key, name in (("json", f"{stem}.json"), ("report", f"{stem}.report.json")):
-        p = os.path.join(tp.OUT_DIR, name)
-        if os.path.isfile(p):
-            with open(p, encoding="utf-8") as f:
-                out[key] = json.load(f)
+    out = {"code": code, "file": fn, "log": tp.mask(buf.getvalue(), _progress["cam"]), "report": tp.LAST_REPORT}
+    p = os.path.join(tp.OUT_DIR, fn)
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as f:
+            out["json"] = json.load(f)
+        with contextlib.suppress(OSError):
+            os.remove(p)                    # the JSON lives in central's base (Save); out/ keeps the .txt
+    t = os.path.join(tp.OUT_DIR, f"{stem}.txt")
+    if os.path.isfile(t):
+        with open(t, encoding="utf-8") as f:
+            out["report_text"] = f.read()
     return out
+
+
+def progress(since: int) -> dict:
+    lines = _progress["lines"][since:]
+    return {"lines": [tp.mask(x, _progress["cam"]) for x in lines], "next": since + len(lines),
+            "running": _progress["running"]}
+
+
+# ---- Save to camera and edge -----------------------------------------------
+def same_ip(data) -> dict:
+    """Other camera JSONs with this camera's IP in central's base and in the site's edge base:
+    Save replaces them (they are deleted; central drops the old camera, its events keep the name)."""
+    fn = camera_file(data)
+    cam = data.get("camera") or {}
+    host, site = str(cam.get("host") or "").strip(), str(cam.get("site") or "").strip()
+    out = {"file": fn, "central": central_base(), "edge": edge_shares().get(site.upper()), "old": []}
+    for where in ("central", "edge"):
+        folder = out[where]
+        if not host or not folder or not os.path.isdir(folder):
+            continue
+        for other, doc in _camera_jsons(folder):
+            if other.lower() != fn.lower() and str(doc["camera"].get("host") or "").strip() == host:
+                out["old"].append({"where": where, "file": other, "name": str(doc["camera"].get("name") or other[:-5])})
+    return out
+
+
+EDGE_ANSWER_SEC = 10    # how long Save waits for multy.py's answer (cameras.ack)
+
+
+def tell_central(fn: str) -> dict:
+    """NOTIFY aisys_cameras <file>: central's pull service loads that one camera file now."""
+    db = pull_config().get("database") or {}
+    try:
+        import psycopg2   # noqa: PLC0415  (on the central PC with the AiSys services)
+    except ImportError:
+        return {"ok": False, "step": "central not told (psycopg2 missing here); it loads the file at its next start"}
+    try:
+        conn = psycopg2.connect(host=db.get("host", "127.0.0.1"), port=db.get("port", 5432), dbname=db.get("dbname"),
+                                user=db.get("user"), password=db.get("password"), connect_timeout=5,
+                                application_name="aisys-camera-tool")
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_notify('aisys_cameras', %s)", (fn,))
+        finally:
+            conn.close()
+        return {"ok": True, "step": f"central told to load {fn}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "step": f"central not told ({type(e).__name__}); it loads the file at its next start"}
+
+
+def ask_edge(folder: str, fn: str) -> dict:
+    """<edge base>/cameras.req: multy.py re-reads its camera files and answers in cameras.ack."""
+    ticket = f"{int(time.time() * 1000)}-{os.getpid()}"
+    req, ack = os.path.join(folder, "cameras.req"), os.path.join(folder, "cameras.ack")
+    try:
+        with open(req + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"ticket": ticket, "file": fn}, f)
+        os.replace(req + ".tmp", req)
+    except OSError as e:
+        return {"ok": False, "step": f"could not ask the edge to read ({e})"}
+    end = time.time() + EDGE_ANSWER_SEC
+    while time.time() < end:
+        time.sleep(0.5)
+        try:
+            with open(ack, encoding="utf-8") as f:
+                a = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if a.get("ticket") != ticket:
+            continue
+        txt = f"edge read the camera files: running {', '.join(a.get('running') or []) or 'none'}"
+        if a.get("off"):
+            txt += f"; switched off {', '.join(a['off'])}"
+        if a.get("notes"):
+            txt += "; " + "; ".join(a["notes"])
+        return {"ok": a.get("state") == "done" and not a.get("notes"), "step": txt}
+    return {"ok": False, "step": f"the edge has not answered in {EDGE_ANSWER_SEC} s (multy.py not running, or an older "
+                                 "multy.py); the request stays, it reads the files when it next starts"}
+
+
+def save_all(data) -> dict:
+    """Save to camera and edge: <site>_<camera>.json into central's base and the site's edge base
+    (both overwritten; the only two copies). Another JSON with the same camera IP is replaced: deleted
+    in both places, its camera name written to "replaces" so central drops the old camera. Then the OSD
+    and the Sensor / Encoder values go to the camera."""
+    steps = []
+    fn = camera_file(data)
+    chk = same_ip(data)
+    host = (data.get("camera") or {}).get("host")
+    me = str((data.get("camera") or {}).get("name") or "").strip()
+    old_names = sorted({o["name"] for o in chk["old"]} - {me})
+    if old_names:
+        data = dict(data)
+        data["replaces"] = sorted(set(data.get("replaces") or []) | set(old_names))
+    if not chk["central"]:
+        return {"file": fn, "steps": [{"ok": False, "step": "central base unknown (central_storage.mount_path in pull.json)"}]}
+    # where both copies live (as pull.json names them), so the edge knows central's copy too
+    pc = pull_config()
+    site_u = str((data.get("camera") or {}).get("site") or "").strip().upper()
+    edge_raw = next((n.get("base_path") for n in pc.get("edge_nodes", []) if str(n.get("site_name", "")).upper() == site_u), None)
+    data = dict(data)
+    data["storage"] = {"central_base": (pc.get("central_storage") or {}).get("mount_path"), "edge_base": edge_raw}
+    for where, folder in (("central", chk["central"]), ("edge", chk["edge"])):
+        if not folder:
+            steps.append({"ok": False, "step": f"no edge base known for site {(data.get('camera') or {}).get('site') or '?'} (pull.json)"})
+            continue
+        try:
+            for other in os.listdir(folder):     # the same file in other capitals (hub_bedroom.json): renamed
+                if other.lower() == fn.lower() and other != fn:
+                    os.remove(os.path.join(folder, other))
+            with open(os.path.join(folder, fn), "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            steps.append({"ok": True, "step": f"saved {fn} on {where}: {folder}"})
+        except OSError as e:
+            steps.append({"ok": False, "step": f"save on {where} failed ({folder}): {type(e).__name__} "
+                                                f"[WinError {getattr(e, 'winerror', None)}, errno {e.errno}] {e}"})
+            continue
+        for o in chk["old"]:
+            if o["where"] == where:
+                try:
+                    os.remove(os.path.join(folder, o["file"]))
+                    steps.append({"ok": True, "step": f"{o['file']} deleted on {where} (same camera IP {host}; replaced by {fn})"})
+                except OSError as e:
+                    steps.append({"ok": False, "step": f"could not delete {o['file']} on {where}: {e}"})
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(tp.OUT_DIR, fn))          # an older copy in out/: central's base has it now
+    if any(s["ok"] and s["step"].startswith(f"saved {fn} on central") for s in steps):
+        steps.append(tell_central(fn))                   # central loads this one file
+    if chk["edge"] and any(s["ok"] and s["step"].startswith(f"saved {fn} on edge") for s in steps):
+        steps.append(ask_edge(chk["edge"], fn))          # multy.py reads its camera files now
+    if host:
+        r = osd.handle(data, "apply")
+        steps.append({"ok": r["ok"], "step": f"camera OSD: title {r['camera_id']} via {r['protocol']}"
+                      + ("" if r["ok"] else f" failed ({'; '.join(r['log'][-2:])})"), "osd": r.get("osd")})
+        steps += camset.lines(camset.write(data))
+    for st in steps:                         # every Save step in the service log too (errors included)
+        tp.log(fn[:-5], f"save {'OK' if st['ok'] else 'FAIL'}: {st['step']}")
+    return {"file": fn, "steps": steps, "json": data}
 
 
 def get_driver(cam):
@@ -105,7 +331,10 @@ def get_driver(cam):
         return _drivers[key]
 
 
-def ptz(cam, action, speed=None, preset=None):
+_status_logged = set()     # cameras whose position reply was already written to the log
+
+
+def ptz(cam, action, speed=None, preset=None, token=None):
     drv = get_driver(cam)
     name = drv.display_name
     if speed is not None:
@@ -127,11 +356,20 @@ def ptz(cam, action, speed=None, preset=None):
             old.cancel()
         ok = drv.stop()
     elif action == "goto":
-        ok = drv.goto_preset(int(preset))
+        ok = drv.goto_preset(token if token and isinstance(drv, tp.ONVIFSoapDriver) else int(preset))
         if ok:
             extra["status"], _ = drv.wait_until_idle()
     elif action == "set_preset":
-        ok = drv.set_preset(int(preset))
+        if isinstance(drv, tp.ONVIFSoapDriver):
+            ok = drv.set_preset(token or int(preset))
+            extra["token"] = drv.last_preset_token          # the camera may give its own preset token
+            if not ok:
+                tp.log(name, f"ptz set_preset refused; the camera's answer: {getattr(drv, 'preset_refusal', None)}")
+                tp.log(name, f"ptz presets on the camera: {getattr(drv, 'presets_answer', None)}")
+            if ok and drv.last_preset_token != str(token or int(preset)):
+                tp.log(name, f"ptz set_preset: the camera keeps this point as its preset {drv.last_preset_token}")
+        else:
+            ok = drv.set_preset(int(preset))
     elif action == "autofocus":
         ok = drv.trigger_autofocus()
     elif action == "lens_init":
@@ -140,6 +378,11 @@ def ptz(cam, action, speed=None, preset=None):
         coords, moving = drv.read_ptz()
         extra = {"status": coords, "moving": moving}
         ok = True
+        raw = getattr(drv, "status_raw", None)
+        if raw and name not in _status_logged:
+            _status_logged.add(name)
+            tp.log(name, f"ptz status: the camera reports {'no position' if not coords.get('reported') else 'all zeros'}; "
+                         f"its answer: {raw}")
     else:
         raise ValueError(f"unknown action {action}")
     err = getattr(drv, "last_error", None)
@@ -191,9 +434,29 @@ def snapshot(cam, which, encoder=None):
     return data
 
 
+def known_login(ip: str):
+    """{login, file} from a camera JSON with this IP: central's base, the edge bases, out/, the old
+    edge_worker files (next to this repo, or --config-dir)."""
+    folders = [central_base(), *edge_shares().values(), tp.OUT_DIR, CONFIG_DIR,
+               os.path.join(tp.SCRIPT_DIR, "..", "edge_worker")]
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        try:
+            items = _camera_jsons(folder)
+        except OSError:
+            continue
+        for fn, data in items:
+            cam = data["camera"]
+            if str(cam.get("host") or "").strip() == ip and (cam.get("username") or cam.get("password")):
+                return {"login": (str(cam.get("username") or ""), str(cam.get("password") or "")), "file": fn}
+    return None
+
+
 def identify_ip(b):
-    """Identify a camera by its IP. No login given: the default logins first (discover.find_login);
-    none works -> {need_login: True, note}. The login used goes into the new JSON."""
+    """Identify a camera by its IP. The login typed on the page is tried first, then the default logins
+    (discover.find_login, at most 3 tries in all); none works -> {need_login: True, note}.
+    The login that worked goes into the new JSON."""
     ip = str(b.get("ip") or "").strip()
     try:
         ipaddress.ip_address(ip)
@@ -201,14 +464,22 @@ def identify_ip(b):
         raise ValueError(f"not an IP address: {ip!r}")
     user, password = str(b.get("username") or ""), str(b.get("password") or "")
     ports, xaddrs = b.get("ports") or [], b.get("onvif_xaddrs") or []
-    login_from = "yours"
-    if not user and not password:
-        found = dc.find_login(ip, ports, xaddrs)
-        if found["login"] is None:
-            return {"need_login": True, "locked": found["locked"], "note": found["note"], "tried": found["tried"]}
+    known = None
+    if not (user or password):                  # a camera JSON with this IP already has a working login
+        known = known_login(ip)
+        if known:
+            user, password = known["login"]
+    found = dc.find_login(ip, ports, xaddrs, first=(user, password) if (user or password) else None)
+    if found["how"] is None:
+        login_from = "yours"            # neither ONVIF nor Dahua CGI: identify tries the given login on RTSP
+    elif found["login"] is None:
+        return {"need_login": True, "locked": found["locked"], "note": found["note"], "tried": found["tried"]}
+    else:
+        login_from = (f"from {known['file']}" if known else "yours") if found["login"] == (user, password) else "default"
         user, password = found["login"]
-        login_from = "default"
     ident = dc.identify(ip, user, password, ports, xaddrs, None)
+    if found.get("how") == "rtsp":
+        ident.setdefault("notes", []).append("ONVIF on this camera takes no login; the login was checked on the video")
     return {"identify": ident, "login_from": login_from, "login_user": user,
             "json": dc.to_camera_json(ident, user, password)}
 
@@ -216,6 +487,12 @@ def identify_ip(b):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep the console to our own short log lines
         pass
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass                           # the page went away (reload) while an answer was on its way
 
     def _send(self, code, body, ctype="application/json"):
         if not isinstance(body, (bytes, bytearray)):
@@ -244,14 +521,17 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/config":
                 with open(config_path(q["where"], q["file"]), encoding="utf-8") as f:
                     data = json.load(f)
-                report = None
-                rp = os.path.join(tp.OUT_DIR, os.path.splitext(os.path.basename(q["file"]))[0] + ".report.json")
+                text = None
+                rp = os.path.join(tp.OUT_DIR, os.path.splitext(os.path.basename(q["file"]))[0] + ".txt")
                 if os.path.isfile(rp):
                     with open(rp, encoding="utf-8") as f:
-                        report = json.load(f)
-                return self._send(200, {"json": data, "report": report})
-            if u.path == "/api/template":
-                return self._send(200, {"json": tp.JSON_TEMPLATE})
+                        text = f.read()
+                return self._send(200, {"json": data, "report_text": text})
+            if u.path == "/api/test/progress":
+                return self._send(200, progress(int(q.get("since", 0))))
+            if u.path == "/api/template":       # with the sites of central's pull.json (the site list)
+                sites = [str(n.get("site_name")) for n in pull_config().get("edge_nodes", []) if n.get("site_name")]
+                return self._send(200, {"json": tp.JSON_TEMPLATE, "sites": list(dict.fromkeys(sites))})
             return self._send(404, {"error": "not found"})
         except Exception as e:
             return self._send(400, {"error": f"{type(e).__name__}: {e}"})
@@ -263,9 +543,13 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/save":
                 return self._send(200, {"saved": save_out(b["file"], b["json"])})
             if u.path == "/api/test":
-                return self._send(200, run_test(b["file"], b["json"], b.get("copy_seconds", 10)))
+                return self._send(200, run_test(b["json"]))
+            if u.path == "/api/same_ip":
+                return self._send(200, same_ip(b["json"]))
+            if u.path == "/api/save_all":
+                return self._send(200, save_all(b["json"]))
             if u.path == "/api/ptz":
-                return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset")))
+                return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset"), b.get("token")))
             if u.path == "/api/discover":
                 devices = dc.discover(b.get("subnet") or None, scan=b.get("scan", True))
                 known = {i["host"]: i for i in list_configs()}
@@ -275,6 +559,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"subnet": b.get("subnet") or dc.default_subnet(), "devices": devices})
             if u.path == "/api/identify":
                 return self._send(200, identify_ip(b))
+            if u.path == "/api/osd":
+                return self._send(200, osd.handle(b["json"], b.get("action", "read")))
             if u.path == "/api/snapshot":
                 return self._send(200, snapshot(b["camera"], b.get("which", "sub"), b.get("encoder")), "image/jpeg")
             return self._send(404, {"error": "not found"})
