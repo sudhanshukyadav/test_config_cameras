@@ -539,7 +539,7 @@ GENERIC_RTSP_PATHS = ["/live/ch0", "/live/ch1", "/onvif1", "/onvif2", "/11", "/1
 
 # Used when no existing camera JSON is given (same layout as edge_worker/livingroom.json).
 JSON_TEMPLATE = {
-    "camera": {"name": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
+    "camera": {"name": "", "site": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
                "http_port": 80, "username": "admin", "password": "",
                "invert_stream": False, "ptz_markers": {}},
     "connection": {"rtsp_transport": "tcp", "buffer_size": 1},
@@ -559,9 +559,12 @@ JSON_TEMPLATE = {
         "roi_crop": [0.2, 0.2, 0.8, 0.8], "min_sharpness": 100, "min_brightness": 50,
         "max_brightness": 220},
     "face_quality": {"enabled": True, "min_face_width": 120, "min_face_height": 120},
+    # On-screen display burned into the video by the camera (osd.py pushes it; multy.py does not read it).
+    "osd": {"show_date": True, "date_format": "dd-MM-yyyy HH:mm:ss", "date_position": [0.02, 0.03],
+            "show_name": True, "name_text": "", "name_position": [0.5, 0.03]},
 }
 SECTION_ORDER = ["camera", "connection", "sensor_hardware_properties",
-                 "stream_encoder_properties", "motion", "face_quality"]
+                 "stream_encoder_properties", "motion", "face_quality", "osd"]
 
 
 def log(name: str, msg: str):
@@ -1114,4 +1117,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()

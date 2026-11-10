@@ -77,6 +77,25 @@ which keeps listening on 127.0.0.1:8091 only (service `AISYS-CamSetup`).
 Backlog: find a camera whose IP is lost or outside this network (other subnet, factory default IP)
 and move it into the control network's range.
 
+## Page layout (one screen)
+
+Parameters (tabs) fill the page; the test result is folded at the bottom. **View · PTZ · POI** opens
+the floating window: picture, zones / ROI, OSD, the PTZ pad and the **points of interest** (numbered
+01, 02 … automatically, you only type the name; Add stores the camera's current position as that
+preset). The JSON's file name is decided by `camera.site` and `camera.name`: `<site>_<camera>.json`
+(e.g. `hub_gate.json`), the same name on the edge and on central.
+
+## On-screen display (OSD): date top left, camera name top middle
+
+`osd.py`; the camera JSON's `osd` section (not read by multy.py):
+`show_date`, `date_format` (default `dd-MM-yyyy HH:mm:ss`), `date_position` (top-left corner, share of
+the picture, default `0.02, 0.03`), `show_name`, `name_text` (blank = camera name), `name_position`
+(top middle point, default `0.5, 0.03` = centred). In the View window: **Place date** / **Place name**
+(click on the picture), **Read OSD** (from the camera), **Apply OSD** (to the camera; read back after).
+Dahua: configManager VideoWidget / ChannelTitle / Locales.TimeFormat. ONVIF: Media GetOSDs / SetOSD /
+CreateOSD / DeleteOSD; a camera that refuses `dd-MM-yyyy` gets `dd/MM/yyyy` (logged). Tested only
+against simulated cameras so far.
+
 ## Config page (`web_ui.py`)
 
 ```

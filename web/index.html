@@ -25,10 +25,27 @@ header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
 header h1 { font-size: 16px; margin: 0; }
 header .who { color: var(--muted); }
 header .spacer { flex: 1; }
-main { display: grid; grid-template-columns: 220px minmax(0, 1fr) 380px; gap: 12px; padding: 12px 16px; }
-@media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } }
-section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
-section.card + section.card { margin-top: 12px; }
+/* one screen: header on top, two columns below that scroll on their own (never the page) */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+header { flex: none; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 10px; padding: 10px 12px; }
+main > div { min-height: 0; overflow: auto; }
+main > div.mid { display: flex; flex-direction: column; overflow: hidden; }
+@media (max-width: 900px) { body { overflow: auto; display: block; } main { display: block; } main > div, main > div.mid { overflow: visible; display: block; } }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+section.card + section.card { margin-top: 10px; }
+.mid .result { flex: none; max-height: 40vh; overflow: auto; margin-top: 10px; }
+.mid .params { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.mid .params form { flex: 1; min-height: 0; overflow: auto; padding-right: 4px; }
+.ptabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.ptabs button { padding: 4px 10px; font-size: 12px; }
+.ptabs button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.params fieldset { border: 0; padding: 0; margin: 0; }
+.params legend { display: none; }
+details.card > summary { cursor: pointer; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+details.card[open] > summary { margin-bottom: 8px; }
+details.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 10px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
 .cams button { display: block; width: 100%; text-align: left; margin: 0 0 4px; }
 .cams .grp { color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
@@ -44,7 +61,7 @@ input, select, textarea { background: var(--input); border: 1px solid var(--line
 input[type=checkbox] { width: auto; }
 fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; padding: 8px 12px 10px; }
 legend { font-weight: 600; padding: 0 6px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 14px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px 14px; }
 .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
 .field .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .field.unused label { opacity: .7; }
@@ -53,10 +70,10 @@ legend { font-weight: 600; padding: 0 6px; }
 .issues li { color: var(--bad); }
 .okline { color: var(--ok); }
 pre.log { background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
-  max-height: 320px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0; }
+  max-height: 160px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .row > input[type=number] { width: 80px; }
-.pad { display: grid; grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(3, 48px); gap: 6px; justify-content: center; margin: 8px 0; }
+.pad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 38px); gap: 5px; justify-content: center; margin: 6px 0; }
 .pad button { font-size: 18px; padding: 0; touch-action: none; user-select: none; }
 .pad button.active { background: var(--pad-active); }
 .snap { width: 100%; aspect-ratio: 16 / 9; background: var(--code); border: 1px solid var(--line); border-radius: 6px;
@@ -66,8 +83,42 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 .snap img { width: 100%; height: 100%; object-fit: fill; display: block; }
 .snap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .snap.drawing canvas { cursor: crosshair; }
+/* camera view: a floating window, dragged by its title bar, resized at its lower right corner */
+.viewwin { position: fixed; right: 12px; top: 60px; width: min(600px, calc(100vw - 24px)); min-width: 320px;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; resize: both; z-index: 40;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .35); margin: 0 !important; }
+.viewwin[hidden] { display: none; }
+.viewwin .vhead { display: flex; align-items: center; gap: 8px; margin: -12px -12px 10px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); cursor: move; user-select: none; touch-action: none; }
+.viewwin .vhead h2 { margin: 0; }
+.viewwin .vhead .muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.viewwin .vhead button { padding: 2px 9px; font-size: 16px; line-height: 1; }
+.viewwin h3 { font-size: 13px; margin: 0 0 6px; }
+.viewwin .row button, .viewwin .zf button { padding: 4px 8px; font-size: 12px; }
+.viewwin .row select { padding: 3px 6px; font-size: 12px; }
+.ptzgrid { display: flex; gap: 10px; align-items: center; }
+.zf { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; flex: 1; }
+.viewwin .vright { display: flex; flex-wrap: wrap; gap: 10px; }
+.viewwin .ptzbox { flex: 0 1 280px; }
+.viewwin .markers { flex: 1 1 200px; margin-top: 0; padding-top: 0; border-top: 0; }
+.zf { grid-template-columns: repeat(2, 60px); flex: none; }
+.viewwin .ptzbox { flex: 0 1 270px; }
+.viewwin .markers { border-left: 1px solid var(--line); padding-left: 10px; }
+.viewwin .markers .row { flex-wrap: nowrap; }
+
+.vbody { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.vleft { flex: 1 1 440px; min-width: 0; }
+.vright { flex: 1 1 100%; min-width: 0; }
+.viewwin .ptzbox { margin: 0; }
+.viewwin .markers { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+#markerList { max-height: 120px; overflow: auto; }
+.viewwin .markers h3 .muted { font-weight: 400; font-size: 12px; }
+.mk { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.mk .no { font-family: ui-monospace, Consolas, monospace; width: 28px; color: var(--muted); }
+.mk .nm { flex: 1; min-width: 50px; padding: 3px 6px; font-size: 12px; }
+.mk button { padding: 3px 9px; font-size: 12px; }
 .legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
-.legend b.z { color: #e5534b; } .legend b.r { color: #4c8dff; }
+.legend b.z { color: #e5534b; } .legend b.r { color: #4c8dff; } .legend b.o { color: #d4a72c; }
 .status { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
 .muted { color: var(--muted); }
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
@@ -79,9 +130,10 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 <header>
   <a id="backLive" href="/live.html" hidden style="text-decoration:none;font-size:13px;border:1px solid #cbd5e1;border-radius:6px;padding:5px 10px;color:inherit">&#9664; Live</a>
   <h1>Camera Config</h1>
+  <button id="btnView" class="primary" title="Open the camera view: picture, PTZ, points of interest, zones, OSD">View · PTZ · POI</button>
   <span class="who" id="who">no camera loaded</span>
   <span class="spacer"></span>
-  <label class="row muted">save as <input id="fname" style="width:160px" placeholder="gate.json"></label>
+  <label class="row muted" title="Decided by camera.site and camera.name: site_camera.json">file <input id="fname" style="width:170px" readonly tabindex="-1"></label>
   <button id="btnSave">Save to out/</button>
   <label class="row muted">copy test <input id="copySec" type="number" value="10" min="0" max="60" style="width:64px"> s</label>
   <button id="btnTest" class="primary">Run test</button>
@@ -89,62 +141,74 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 
 <main>
   <div>
-    <section class="card cams" id="cams"><h2>Cameras</h2></section>
     <section class="card">
       <h2>Add camera by IP</h2>
-      <input id="ipAddr" placeholder="camera IP, e.g. 192.168.8.40" autocomplete="off">
+      <input id="ipAddr" value="192.168." placeholder="camera IP, e.g. 192.168.8.40" autocomplete="off">
       <div class="row" style="margin-top:6px">
-        <input id="ipUser" placeholder="login (blank = defaults)" autocomplete="off" style="flex:1">
-        <input id="ipPass" type="password" placeholder="password" autocomplete="off" style="flex:1">
+        <input id="ipUser" value="admin" placeholder="login" autocomplete="off" style="flex:1">
+        <input id="ipPass" type="password" value="admin123" placeholder="password" autocomplete="off" style="flex:1">
       </div>
       <button id="btnIdentifyIp" class="primary" style="margin-top:6px;width:100%">Identify</button>
-      <p class="muted" id="ipNote" style="font-size:12px;margin:6px 0 0">Login blank: the usual factory logins are tried first (at most 3); you are asked only if none works.</p>
+      <p class="muted" id="ipNote" style="font-size:12px;margin:6px 0 0">This login is tried first, then the usual factory logins (at most 3 tries in all); you are asked only if none works.</p>
     </section>
-    <section class="card">
-      <h2>Find cameras</h2>
+    <section class="card cams" id="cams"><h2>Cameras</h2></section>
+    <details class="card" id="findBox">
+      <summary>Find cameras</summary>
       <input id="discSubnet" placeholder="subnet, e.g. 192.168.8.0/24 (blank = this PC's)">
       <div class="row" style="margin-top:6px">
-        <input id="discUser" placeholder="login" autocomplete="off" style="flex:1">
-        <input id="discPass" type="password" placeholder="password" autocomplete="off" style="flex:1">
+        <input id="discUser" value="admin" placeholder="login" autocomplete="off" style="flex:1">
+        <input id="discPass" type="password" value="admin123" placeholder="password" autocomplete="off" style="flex:1">
       </div>
       <label class="row muted" style="margin-top:6px"><input type="checkbox" id="discScan" checked> also scan ports (finds non-ONVIF cameras)</label>
       <button id="btnDiscover" class="primary" style="margin-top:6px;width:100%">Discover</button>
       <div id="discList" class="cams" style="margin-top:8px"></div>
-      <p class="muted" style="font-size:12px;margin:6px 0 0">Login blank: the default logins are tried. Click a camera to identify it and open a new JSON; then Run test.</p>
-    </section>
-    <section class="card"><button id="btnNew">New camera</button>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Source files are read only. Saving and testing write to <code>out/</code>.</p></section>
+      <p class="muted" style="font-size:12px;margin:6px 0 0">This login first, then the default logins. Click a camera to identify it and open a new JSON; then Run test.</p>
+    </details>
+    <div class="row" style="margin-top:10px"><button id="btnNew">New camera</button>
+      <span class="muted" style="font-size:12px">saves and tests write to <code>out/</code></span></div>
   </div>
 
-  <div>
-    <section class="card">
-      <h2>Test result</h2>
+  <div class="mid">
+    <section class="card params"><div class="ptabs" id="ptabs"></div><form id="form" onsubmit="return false"></form></section>
+    <details class="card result" id="resultBox">
+      <summary>Test result <span class="muted" id="resultLine" style="text-transform:none;letter-spacing:0;font-weight:400"></span></summary>
       <div id="result" class="muted">Run a test to measure what the camera really sends.</div>
       <pre class="log" id="log" hidden></pre>
-    </section>
-    <section class="card"><h2>Parameters</h2><form id="form" onsubmit="return false"></form></section>
+    </details>
   </div>
 
-  <div>
-    <section class="card">
-      <h2>View</h2>
-      <div class="snap" id="snap">no picture</div>
-      <div class="row" style="margin-top:8px">
-        <select id="snapWhich" style="width:auto"><option value="sub">sub stream</option><option value="main">main stream</option></select>
-        <button id="btnSnap">Refresh picture</button>
-        <label class="row muted"><input type="checkbox" id="autoSnap" checked> after moves</label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnDrawZone" title="Drag on the picture to add an area motion detection ignores">Draw exclude zone</button>
-        <button id="btnDrawRoi" title="Drag on the picture to set the only area watched (turns on use_roi)">Draw ROI</button>
-        <button id="btnClearZones">Clear zones</button>
-      </div>
-      <div class="legend"><b class="z">red</b> = exclude zones, <b class="r">blue</b> = ROI (when use_roi). Changes go into the motion fields; Save to keep them.</div>
-    </section>
-    <section class="card" id="ptzCard">
-      <h2>PTZ</h2>
-      <div id="ptzOff" class="muted" hidden>This camera has ptz_protocol "none". Change it in Parameters to use PTZ.</div>
-      <div id="ptzOn">
+</main>
+<section class="card viewwin" id="viewWin" aria-label="Camera view" hidden>
+  <div class="vhead" id="viewHead" title="Drag to move; drag the lower right corner to resize">
+    <h2>View</h2><span class="muted" id="viewWho"></span>
+    <button id="btnViewClose" title="Close (the View button in the header opens it again)">&times;</button>
+  </div>
+  <div class="vbody">
+  <div class="vleft">
+  <div class="snap" id="snap">no picture</div>
+  <div class="row" style="margin-top:8px">
+    <select id="snapWhich" style="width:auto"><option value="sub">sub stream</option><option value="main">main stream</option></select>
+    <button id="btnSnap">Refresh picture</button>
+    <label class="row muted"><input type="checkbox" id="autoSnap" checked> after moves</label>
+  </div>
+  <div class="row" style="margin-top:6px;gap:5px">
+    <button id="btnDrawZone" title="Draw exclude zone: drag on the picture to add an area motion detection ignores">Zone</button>
+    <button id="btnDrawRoi" title="Draw ROI: drag on the picture to set the only area watched (turns on use_roi)">ROI</button>
+    <button id="btnClearZones" title="Clear zones and ROI">Clear</button>
+    <span style="width:6px"></span>
+    <button id="btnPlaceDate" title="Place date: click on the picture where the date should start (its top-left corner)">Date</button>
+    <button id="btnPlaceName" title="Place name: click on the picture where the name should be (its top middle)">Name</button>
+    <button id="btnReadOsd" title="Read the date / name settings from the camera into the osd fields">Read OSD</button>
+    <button id="btnApplyOsd" class="primary" title="Send the osd fields to the camera">Apply OSD</button>
+  </div>
+  <div class="legend" title="Drawing and placing change the motion / osd fields; Save to out/ keeps them."><b class="z">red</b> exclude zones · <b class="r">blue</b> ROI · <b class="o">yellow</b> date / name</div>
+  </div>
+  <div class="vright">
+  <div class="ptzbox" id="ptzCard">
+    <h3>PTZ</h3>
+  <div id="ptzOff" class="muted" hidden>This camera has ptz_protocol "none". Change it in Parameters to use PTZ.</div>
+    <div id="ptzOn">
+      <div class="ptzgrid">
         <div class="pad">
           <span></span><button data-move="up" title="Tilt up (↑)">▲</button><span></span>
           <button data-move="left" title="Pan left (←)">◀</button>
@@ -152,33 +216,36 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
           <button data-move="right" title="Pan right (→)">▶</button>
           <span></span><button data-move="down" title="Tilt down (↓)">▼</button><span></span>
         </div>
-        <div class="row" style="justify-content:center">
-          <button data-move="zoom_in" title="Zoom in (+)">Zoom +</button>
-          <button data-move="zoom_out" title="Zoom out (-)">Zoom −</button>
-          <button data-move="focus_near">Focus near</button>
-          <button data-move="focus_far">Focus far</button>
+        <div class="zf">
+          <button data-move="zoom_in" title="Zoom in (+)">Zoom+</button>
+          <button data-move="zoom_out" title="Zoom out (-)">Zoom−</button>
+          <button data-move="focus_near">Near</button>
+          <button data-move="focus_far">Far</button>
+          <button id="btnAF" title="Autofocus">AF</button>
+          <button id="btnLens" title="Lens init">Init</button>
         </div>
-        <div class="row" style="margin-top:10px">
-          <span class="muted">Speed</span>
-          <input type="range" id="speed" min="0.1" max="1" step="0.1" value="0.5" style="flex:1">
-          <span id="speedVal" class="status">0.5</span>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <span class="muted">Preset</span>
-          <input type="number" id="preset" min="1" max="255" value="1">
-          <button id="btnGoto">Go</button>
-          <button id="btnSetPreset" title="Save the current position as this preset">Save here</button>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button id="btnAF">Autofocus</button>
-          <button id="btnLens">Lens init</button>
-          <button id="btnStatus">Read position</button>
-        </div>
-        <div class="status" id="ptzStatus" style="margin-top:8px">hold a direction button or arrow key; release to stop</div>
       </div>
-    </section>
+      <div class="row" style="margin-top:6px">
+        <span class="muted">Speed</span>
+        <input type="range" id="speed" min="0.1" max="1" step="0.1" value="0.5" style="flex:1">
+        <span id="speedVal" class="status">0.5</span>
+        <button id="btnStatus" class="small" title="Read position">Pos</button>
+      </div>
+      <div class="status" id="ptzStatus" style="margin-top:4px;font-size:12px">hold a direction button or arrow key; release to stop</div>
+    </div>
+    </div>
+  <div class="markers" id="markersBox">
+      <h3 title="Points of interest: numbered 01, 02 … automatically; you only give the name. Saved in camera.ptz_markers and as presets (the location names central shows).">Points of interest</h3>
+      <div id="markerList"></div>
+      <div class="row" style="margin-top:6px">
+        <span class="no" id="mkNo" title="next point number (automatic)">01</span>
+        <input id="mkName" placeholder="name of this point" style="flex:1;min-width:60px">
+        <button id="btnMkAdd" class="primary" title="Store the camera's current position as this preset and give it this name">Add</button>
+      </div>
   </div>
-</main>
+  </div>
+  </div>
+</section>
 <div id="toast"></div>
 
 <script>
@@ -193,7 +260,14 @@ let TEMPLATE = null;  // default JSON from the server; missing keys are filled f
 
 // What each key does. "*" = not read by edge_worker's multy.py (kept for reference / future use).
 const HINTS = {
+  "osd.show_date": "* date and time on the picture",
+  "osd.date_format": "* e.g. dd-MM-yyyy HH:mm:ss (some cameras only offer their own formats)",
+  "osd.date_position": "* top-left corner of the date: x, y as share of the picture (0, 0 = top left)",
+  "osd.show_name": "* camera name on the picture",
+  "osd.name_text": "* blank = the camera's name",
+  "osd.name_position": "* top-middle point of the name: x, y (0.5 = centred)",
   "camera.name": "camera name in logs and folders",
+  "camera.site": "* site (location) of the camera, e.g. HUB: the file is saved as site_camera.json",
   "camera.vendor": "dahua = Dahua RTSP/CGI paths; generic = stream paths below",
   "camera.ptz_protocol": "dahua_cgi, onvif_soap or none",
   "camera.host": "camera IP address",
@@ -233,6 +307,7 @@ const HINTS = {
 const SECTION_HINTS = {
   sensor_hardware_properties: "* Picture settings on the camera. Not read by multy.py; not yet pushed to the camera.",
   face_quality: "* Not read by multy.py.",
+  osd: "* On-screen display burned into the video by the camera. Not read by multy.py: set it with Place date / Place name and Apply OSD in the View window.",
 };
 
 function withDefaults(json) {
@@ -251,7 +326,54 @@ function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add
 
 // Opened through the AiSys local site (/cameras): its calls go to /cameras/api/..., passed on to web_ui.py.
 const BASE = location.pathname.startsWith("/cameras") ? "/cameras" : "";
+
+// ---- the floating camera view window (position remembered in this browser)
+(function viewWindow() {
+  const win = $("viewWin"), head = $("viewHead");
+  const store = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} };
+  const load = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const keepInside = () => {
+    const r = win.getBoundingClientRect();
+    if (!win.style.left) return;
+    win.style.left = Math.max(0, Math.min(r.left, innerWidth - r.width)) + "px";
+    win.style.top = Math.max(0, Math.min(r.top, innerHeight - 40)) + "px";
+  };
+  try {
+    const p = JSON.parse(load("camcfg_view2") || "null");
+    if (p) { Object.assign(win.style, { left: p.l + "px", top: p.t + "px", right: "auto", bottom: "auto" });
+             if (p.w) win.style.width = p.w + "px"; keepInside(); }
+  } catch (e) {}
+  win.hidden = true;     // opened with the View button (for PTZ and points of interest)
+  let start = null;
+  head.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;
+    const r = win.getBoundingClientRect();
+    start = { x: e.clientX - r.left, y: e.clientY - r.top };
+    head.setPointerCapture(e.pointerId);
+  });
+  head.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    Object.assign(win.style, { right: "auto", bottom: "auto",
+      left: Math.max(0, Math.min(e.clientX - start.x, innerWidth - win.offsetWidth)) + "px",
+      top: Math.max(0, Math.min(e.clientY - start.y, innerHeight - 40)) + "px" });
+  });
+  const save = () => { const r = win.getBoundingClientRect();
+    store("camcfg_view2", JSON.stringify({ l: Math.round(r.left), t: Math.round(r.top), w: Math.round(r.width) })); };
+  head.addEventListener("pointerup", () => { if (start) { start = null; save(); } });
+  head.addEventListener("pointercancel", () => { start = null; });
+  new ResizeObserver(() => { if (!win.hidden && win.style.left) save(); }).observe(win);
+  addEventListener("resize", keepInside);
+  $("btnViewClose").onclick = () => { win.hidden = true; stopAll(); };
+  $("btnView").onclick = () => { win.hidden = false; keepInside(); setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+    if (current && !document.querySelector(".snap img")) refreshSnap(); };
+})();
 if (BASE) $("backLive").hidden = false;    // back to the local site's Latest Happenings
+// Opened through the local site: offer its site names for camera.site
+if (BASE) fetch("/api/tree", { cache: "no-store" }).then(r => r.ok ? r.json() : null).then(d => {
+  const dl = document.createElement("datalist"); dl.id = "siteList";
+  dl.innerHTML = ((d && d.sites) || []).map(x => `<option value="${esc(x.site)}">${esc(x.name || x.site)}</option>`).join("");
+  document.body.appendChild(dl);
+}).catch(() => {});
 async function api(path, body) {
   const r = await fetch(BASE + path, body === undefined ? {} :
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -292,12 +414,15 @@ function setCurrent(c) {
   $("fname").value = c.file;
   const cam = c.json.camera || {};
   $("who").textContent = `${cam.name || "?"} · ${cam.host || "no host"} · ${c.where === "out" ? "out/" : "source"} ${c.file}`;
+  $("viewWho").textContent = `${cam.name || "?"} · ${cam.host || ""}`;
   buildForm(c.json, c.report);
+  updateFileName();
   showReport(c.report);
   updatePtzPanel();
+  renderMarkers();
   $("snap").textContent = "no picture"; stopAll(false);
   loadList();
-  if (cam.host) refreshSnap();
+  if (cam.host && !$("viewWin").hidden) refreshSnap();
 }
 
 // ---- parameter form, generated from the JSON so new keys show up automatically
@@ -314,6 +439,31 @@ function buildForm(json, report) {
     for (const [k, v] of Object.entries(obj)) grid.appendChild(fieldFor(sec, k, v));
     form.appendChild(fs);
   }
+  showTab(TAB_NOW in json ? TAB_NOW : Object.keys(json)[0]);
+  document.getElementById("f_camera_site")?.setAttribute("list", "siteList");
+}
+// The JSON's file name is decided by the camera's site and name: <site>_<camera>.json (e.g. hub_gate.json)
+const slug = (v) => String(v || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+function updateFileName() {
+  const site = slug(document.getElementById("f_camera_site")?.value), name = slug(document.getElementById("f_camera_name")?.value);
+  if (!name) return;
+  $("fname").value = (site ? `${site}_${name}` : name) + ".json";
+  const cam = document.getElementById("f_camera_host")?.value || "";
+  $("who").textContent = `${document.getElementById("f_camera_name")?.value || "?"} · ${cam || "no host"} · ${$("fname").value}`;
+  $("viewWho").textContent = `${document.getElementById("f_camera_name")?.value || "?"} · ${cam}`;
+  drawOverlay();
+  if (!site) $("fname").title = "Give camera.site to get site_camera.json"; else $("fname").title = "site_camera.json";
+}
+document.addEventListener("input", (e) => { if (e.target.id === "f_camera_site" || e.target.id === "f_camera_name") updateFileName(); });
+// Parameters: one section at a time (tabs), so the page fits one screen
+let TAB_NOW = "camera";
+const TAB_NAMES = { sensor_hardware_properties: "sensor", stream_encoder_properties: "encoder", face_quality: "face" };
+function showTab(sec) {
+  TAB_NOW = sec;
+  const secs = [...$("form").querySelectorAll("fieldset[data-section]")].map(f => f.dataset.section);
+  $("ptabs").innerHTML = secs.map(x => `<button type="button" data-tab="${esc(x)}" class="${x === sec ? "on" : ""}">${esc(TAB_NAMES[x] || x)}</button>`).join("");
+  $("ptabs").querySelectorAll("button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+  $("form").querySelectorAll("fieldset[data-section]").forEach(f => { f.hidden = f.dataset.section !== sec; });
 }
 
 function fieldFor(sec, key, v) {
@@ -348,6 +498,7 @@ function fieldFor(sec, key, v) {
   }
   if (sec === "motion" && (key === "exclude_zones" || key === "roi_crop" || key === "use_roi"))
     el.addEventListener("change", drawOverlay);
+  if (sec === "osd") el.addEventListener("change", drawOverlay);
   return wrap;
 }
 
@@ -363,11 +514,15 @@ function readForm() {
     else v = el.value;
     if (key === "") out[section] = v; else out[section][key] = v;
   }
+  // PTZ markers are the camera's points of interest: the central server reads their names from "presets"
+  const mk = out.camera && out.camera.ptz_markers;
+  if (mk && typeof mk === "object" && Object.keys(mk).length) out.presets = mk;
   return out;
 }
 
 function showReport(rep) {
   const box = $("result");
+  $("resultLine").textContent = !rep ? "· no test yet" : `· tested ${rep.time || ""} · ${(rep.issues || []).length ? (rep.issues.length + " issue(s)") : "ready for edge_worker"}`;
   if (!rep) { box.className = "muted"; box.textContent = "No test yet for this file. Run a test to measure what the camera really sends."; return; }
   box.className = "";
   const s = (rep.streams || []).map(x => `${x.path}: ${x.width}x${x.height} ${x.codec} ${x.fps} fps, keyframe every ${x.gop ?? "?"}`);
@@ -381,6 +536,8 @@ function showReport(rep) {
 
 $("btnSave").onclick = async () => {
   if (!current) return toast("Load a camera first");
+  updateFileName();
+  if (!document.getElementById("f_camera_site")?.value.trim()) { showTab("camera"); toast("Give camera.site first (file name = site_camera.json)"); return document.getElementById("f_camera_site")?.focus(); }
   try { const json = readForm(); const file = $("fname").value.trim();
     const d = await api("/api/save", { file, json });
     current = { ...current, where: "out", file, json }; toast("Saved " + d.saved); loadList();
@@ -429,9 +586,14 @@ $("btnDiscover").onclick = async () => {
   b.disabled = false; b.textContent = "Discover";
 };
 
-$("btnIdentifyIp").onclick = () => identifyCam({ ip: $("ipAddr").value.trim(), ports: [], onvif_xaddrs: [] },
-  $("btnIdentifyIp"), $("ipUser"), $("ipPass"));
+$("btnIdentifyIp").onclick = () => {
+  const ip = $("ipAddr").value.trim();
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) { toast("Fill in the rest of the IP address"); $("ipAddr").focus(); return; }
+  identifyCam({ ip, ports: [], onvif_xaddrs: [] },
+  $("btnIdentifyIp"), $("ipUser"), $("ipPass")); };
 $("ipAddr").addEventListener("keydown", e => { if (e.key === "Enter") $("btnIdentifyIp").click(); });
+$("ipAddr").addEventListener("focus", () => { const f = $("ipAddr"); setTimeout(() => f.setSelectionRange(f.value.length, f.value.length), 0); });
+setTimeout(() => $("ipAddr").focus(), 300);   // ready to type the rest of the address
 
 async function identifyCam(dev, btn, userEl = $("discUser"), passEl = $("discPass")) {
   const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = `${esc(dev.ip)} <small>identifying… (up to 30 s)</small>`;
@@ -464,7 +626,7 @@ async function identifyCam(dev, btn, userEl = $("discUser"), passEl = $("discPas
 // ---- PTZ
 function camNow() { try { return readForm().camera; } catch { return current.json.camera; } }
 function updatePtzPanel() {
-  const off = !current || (current.json.camera || {}).ptz_protocol === "none";
+  const off = !current || (camNow() || {}).ptz_protocol === "none";
   $("ptzOff").hidden = !off; $("ptzOn").hidden = off;
 }
 $("form").addEventListener("change", (e) => { if (e.target.dataset.key === "ptz_protocol") updatePtzPanel(); });
@@ -509,12 +671,54 @@ document.addEventListener("keyup", (e) => { if (KEYS[e.key] && moving === KEYS[e
 window.addEventListener("blur", () => stopAll());
 
 $("speed").oninput = () => $("speedVal").textContent = $("speed").value;
-$("btnGoto").onclick = async () => { $("ptzStatus").textContent = "moving to preset…";
-  const d = await ptz("goto", { preset: Number($("preset").value) }); if (d && d.ok && $("autoSnap").checked) refreshSnap(); };
-$("btnSetPreset").onclick = () => { if (confirm(`Overwrite preset ${$("preset").value} with the current position?`)) ptz("set_preset", { preset: Number($("preset").value) }); };
 $("btnAF").onclick = () => ptz("autofocus");
 $("btnLens").onclick = () => ptz("lens_init");
 $("btnStatus").onclick = () => ptz("status");
+
+// ---- PTZ markers = points of interest: {"01": "Gate entrance"} in camera.ptz_markers (also written as the
+// top-level "presets" that the central server reads for the location names)
+const mkField = () => document.getElementById("f_camera_ptz_markers");
+function markersNow() {
+  try { const m = JSON.parse(mkField()?.value || "{}"); return m && typeof m === "object" && !Array.isArray(m) ? m : {}; }
+  catch { return {}; }
+}
+function setMarkers(m) {
+  const sorted = Object.fromEntries(Object.entries(m).sort(([a], [b]) => Number(a) - Number(b)));
+  if (mkField()) mkField().value = JSON.stringify(sorted);
+  renderMarkers();
+}
+function renderMarkers() {
+  const m = markersNow(), box = $("markerList"); box.innerHTML = "";
+  const keys = Object.keys(m).sort((a, b) => Number(a) - Number(b));
+  if (!keys.length) box.innerHTML = '<div class="muted" style="font-size:12px">none yet: move the camera, type a name, Add</div>';
+  for (const k of keys) {
+    const row = document.createElement("div"); row.className = "mk";
+    row.innerHTML = `<span class="no">${esc(k)}</span><input class="nm" value="${esc(m[k])}">` +
+      `<button data-a="go" title="Move the camera to this point">Go</button>` +
+      `<button data-a="here" title="Store the camera's current position as this point">Set</button>` +
+      `<button data-a="del" title="Remove from the list (the camera keeps its preset)">&times;</button>`;
+    row.querySelector(".nm").onchange = (e) => { const x = markersNow(); x[k] = e.target.value.trim(); setMarkers(x); };
+    row.querySelector('[data-a="go"]').onclick = async () => { $("ptzStatus").textContent = `moving to ${k} ${m[k]}…`;
+      const d = await ptz("goto", { preset: Number(k) }); if (d && d.ok && $("autoSnap").checked) refreshSnap(); };
+    row.querySelector('[data-a="here"]').onclick = () => {
+      if (confirm(`Store the current position as ${k} "${m[k]}"?`)) ptz("set_preset", { preset: Number(k) }); };
+    row.querySelector('[data-a="del"]').onclick = () => { const x = markersNow(); delete x[k]; setMarkers(x); };
+    box.appendChild(row);
+  }
+  $("mkNo").textContent = nextPoi(m);
+}
+function nextPoi(m) { let n = 1; while (m[String(n).padStart(2, "0")] !== undefined) n++; return String(n).padStart(2, "0"); }
+$("mkName").addEventListener("keydown", e => { if (e.key === "Enter") $("btnMkAdd").click(); });
+$("btnMkAdd").onclick = async () => {
+  if (!current) return toast("Load a camera first");
+  const name = $("mkName").value.trim(), m = markersNow(), k = nextPoi(m), n = Number(k);
+  if (!name) { toast("Give the point a name"); return $("mkName").focus(); }
+  if (n > 255) return toast("No preset numbers left (255)");
+  const d = await ptz("set_preset", { preset: n });
+  if (!d || !d.ok) return toast("The camera did not store the preset: see the PTZ status line");
+  m[k] = name; setMarkers(m); $("mkName").value = "";
+  toast(`${k} ${name} stored. Save to out/ to keep it in the JSON.`);
+};
 
 // ---- picture
 async function refreshSnap() {
@@ -553,13 +757,39 @@ function drawOverlay() {
   if (fld("use_roi")?.checked && roiNow()) rect(roiNow(), "#4c8dff", "rgba(76,141,255,.10)");
   zonesNow().forEach(z => Array.isArray(z) && z.length === 4 && rect(z, "#e5534b", "rgba(229,83,75,.28)"));
   if (dragStart && dragNow) rect(norm(dragStart, dragNow), drawMode === "roi" ? "#4c8dff" : "#e5534b", "rgba(255,255,255,.15)");
+  // OSD: where the date (top-left corner) and the name (top middle) will be
+  const ofl = (k) => document.getElementById(`f_osd_${k}`);
+  const pt = (k) => { const v = (ofl(k)?.value || "").split(",").map(Number); return v.length === 2 && v.every(n => !isNaN(n)) ? v : null; };
+  g.font = "bold 13px system-ui, sans-serif"; g.textBaseline = "top";
+  const label = (x, y, text, centre) => {
+    const tw = g.measureText(text).width + 10, px = centre ? x * w - tw / 2 : x * w, py = y * h;
+    g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(px, py, tw, 20);
+    g.strokeStyle = "#d4a72c"; g.strokeRect(px, py, tw, 20);
+    g.fillStyle = "#ffd866"; g.fillText(text, px + 5, py + 4);
+  };
+  if (ofl("show_date")?.checked && pt("date_position")) {
+    const [x, y] = pt("date_position"), n = new Date(), p2 = (v) => String(v).padStart(2, "0");
+    const shown = (ofl("date_format")?.value || "dd-MM-yyyy HH:mm:ss")
+      .replace(/yyyy|MM|dd|HH|mm|ss/g, t => ({ yyyy: n.getFullYear(), MM: p2(n.getMonth() + 1), dd: p2(n.getDate()),
+                                             HH: p2(n.getHours()), mm: p2(n.getMinutes()), ss: p2(n.getSeconds()) }[t]));
+    label(x, y, shown, false);
+  }
+  if (ofl("show_name")?.checked && pt("name_position")) {
+    const [x, y] = pt("name_position"); label(x, y, ofl("name_text")?.value || document.getElementById("f_camera_name")?.value || "camera", true);
+  }
 }
 const r3 = (n) => Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000;
 function norm(a, b) { return [r3(Math.min(a[0], b[0])), r3(Math.min(a[1], b[1])), r3(Math.max(a[0], b[0])), r3(Math.max(a[1], b[1]))]; }
 function hookCanvas(cv) {
   const pos = (e) => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) / b.width, (e.clientY - b.top) / b.height]; };
   cv.addEventListener("pointerdown", (e) => {
-    if (!drawMode) return; e.preventDefault(); cv.setPointerCapture(e.pointerId); dragStart = dragNow = pos(e); });
+    if (!drawMode) return; e.preventDefault();
+    if (drawMode === "date" || drawMode === "name") {          // one click places the date / name
+      const [x, y] = pos(e).map(r3), f = document.getElementById(`f_osd_${drawMode}_position`);
+      if (f) { f.value = `${x}, ${y}`; document.getElementById(`f_osd_show_${drawMode}`).checked = true; }
+      setDrawMode(null); drawOverlay(); return;
+    }
+    cv.setPointerCapture(e.pointerId); dragStart = dragNow = pos(e); });
   cv.addEventListener("pointermove", (e) => { if (dragStart) { e.preventDefault(); dragNow = pos(e); drawOverlay(); } });
   const finish = (e) => {
     if (!dragStart) return; const r = norm(dragStart, e.type === "pointerup" ? pos(e) : dragNow); dragStart = dragNow = null;
@@ -574,7 +804,33 @@ function hookCanvas(cv) {
 function setDrawMode(m) {
   drawMode = m; document.querySelector(".snap").classList.toggle("drawing", !!m);
   $("btnDrawZone").classList.toggle("sel", m === "zone"); $("btnDrawRoi").classList.toggle("sel", m === "roi");
+  $("btnPlaceDate").classList.toggle("sel", m === "date"); $("btnPlaceName").classList.toggle("sel", m === "name");
 }
+$("btnPlaceDate").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "date" ? null : "date"); };
+$("btnPlaceName").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "name" ? null : "name"); };
+function setOsdFields(o) {
+  for (const [k, v] of Object.entries(o || {})) {
+    const f = document.getElementById(`f_osd_${k}`); if (!f) continue;
+    if (f.dataset.type === "bool") f.checked = !!v; else if (Array.isArray(v)) f.value = v.join(", "); else f.value = v;
+  }
+  drawOverlay();
+}
+async function osdCall(action) {
+  if (!current) return toast("Load a camera first");
+  let json; try { json = readForm(); } catch (e) { return toast(e.message); }
+  const b = action === "apply" ? $("btnApplyOsd") : $("btnReadOsd"), old = b.textContent;
+  b.disabled = true; b.textContent = action === "apply" ? "Applying…" : "Reading…";
+  try {
+    const d = await api("/api/osd", { json, action });
+    if (d.osd) setOsdFields(d.osd);
+    $("log").hidden = false; $("log").textContent = `OSD ${action} via ${d.protocol}: ${d.ok ? "OK" : "FAILED"}\n` + (d.log || []).join("\n");
+    toast(d.ok ? (action === "apply" ? "OSD sent to the camera" : "OSD read from the camera") : "OSD " + action + " failed: see the log");
+    if (action === "apply" && d.ok) setTimeout(refreshSnap, 1500);
+  } catch (e) { toast(e.message); }
+  b.disabled = false; b.textContent = old;
+}
+$("btnReadOsd").onclick = () => osdCall("read");
+$("btnApplyOsd").onclick = () => osdCall("apply");
 $("btnDrawZone").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "zone" ? null : "zone"); };
 $("btnDrawRoi").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "roi" ? null : "roi"); };
 $("btnClearZones").onclick = () => { if (!current) return; fld("exclude_zones").value = "[]"; fld("use_roi").checked = false; drawOverlay(); };
