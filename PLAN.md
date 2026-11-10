@@ -52,12 +52,30 @@ python discover.py --identify 192.168.8.40 --user admin --password xxx --write
 2. Identify: ONVIF maker / model / PTZ service / profiles (codec, size, fps) and each stream's RTSP
    address from GetStreamUri; Dahua CGI check (Dahua OEM cameras call themselves "General");
    without ONVIF, a short list of maker RTSP paths (Dahua, Hikvision, generic).
-3. Logins tried: the one you give, plus no login. Nothing is guessed.
+3. Logins: the one you give, plus no login. Given none, the usual factory logins are tried first
+   (`admin` / blank, `admin` / `admin`, `admin` / `12345`, plus your own in `default_logins.json`,
+   git-ignored), at most 3 per camera, one ONVIF (else Dahua CGI) call each, stopping at the first
+   that works or when the camera reports a lock; only then the page asks for the login.
 4. Writes a starting JSON; then run the camera test, which measures what the camera really sends.
    The camera test itself now also asks ONVIF for stream addresses.
 
 Found this way (2026-11-08): livingroom and apcam (NVT JA-A1A) have a real sub stream,
 `/live/ch00_1` 640x360 H.264; the edge_worker JSONs use `/live/ch0` for both main and sub.
+
+## Add camera by IP (starting point)
+
+The IP is the starting point; the camera JSON is the output. On the page: **Add camera by IP**,
+login blank (default logins, see above) or given, **Identify** -> a new JSON with the measured
+streams opens; then Run test, motion zones / ROI, PTZ presets, Save to out/.
+
+## In the AiSys local site
+
+`http://localhost:8080/cameras` on the central PC (admin only, not from other PCs): the local site
+(aivision `site/local_web.py`) checks the sign-in and passes `/cameras/api/...` on to this server,
+which keeps listening on 127.0.0.1:8091 only (service `AISYS-CamSetup`).
+
+Backlog: find a camera whose IP is lost or outside this network (other subnet, factory default IP)
+and move it into the control network's range.
 
 ## Config page (`web_ui.py`)
 

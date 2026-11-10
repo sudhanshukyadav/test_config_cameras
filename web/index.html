@@ -77,6 +77,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 </head>
 <body>
 <header>
+  <a id="backLive" href="/live.html" hidden style="text-decoration:none;font-size:13px;border:1px solid #cbd5e1;border-radius:6px;padding:5px 10px;color:inherit">&#9664; Live</a>
   <h1>Camera Config</h1>
   <span class="who" id="who">no camera loaded</span>
   <span class="spacer"></span>
@@ -90,6 +91,16 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
   <div>
     <section class="card cams" id="cams"><h2>Cameras</h2></section>
     <section class="card">
+      <h2>Add camera by IP</h2>
+      <input id="ipAddr" placeholder="camera IP, e.g. 192.168.8.40" autocomplete="off">
+      <div class="row" style="margin-top:6px">
+        <input id="ipUser" placeholder="login (blank = defaults)" autocomplete="off" style="flex:1">
+        <input id="ipPass" type="password" placeholder="password" autocomplete="off" style="flex:1">
+      </div>
+      <button id="btnIdentifyIp" class="primary" style="margin-top:6px;width:100%">Identify</button>
+      <p class="muted" id="ipNote" style="font-size:12px;margin:6px 0 0">Login blank: the usual factory logins are tried first (at most 3); you are asked only if none works.</p>
+    </section>
+    <section class="card">
       <h2>Find cameras</h2>
       <input id="discSubnet" placeholder="subnet, e.g. 192.168.8.0/24 (blank = this PC's)">
       <div class="row" style="margin-top:6px">
@@ -99,7 +110,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
       <label class="row muted" style="margin-top:6px"><input type="checkbox" id="discScan" checked> also scan ports (finds non-ONVIF cameras)</label>
       <button id="btnDiscover" class="primary" style="margin-top:6px;width:100%">Discover</button>
       <div id="discList" class="cams" style="margin-top:8px"></div>
-      <p class="muted" style="font-size:12px;margin:6px 0 0">Only this login and no login are tried. Click a camera to identify it and open a new JSON; then Run test.</p>
+      <p class="muted" style="font-size:12px;margin:6px 0 0">Login blank: the default logins are tried. Click a camera to identify it and open a new JSON; then Run test.</p>
     </section>
     <section class="card"><button id="btnNew">New camera</button>
       <p class="muted" style="font-size:12px;margin:8px 0 0">Source files are read only. Saving and testing write to <code>out/</code>.</p></section>
@@ -238,8 +249,11 @@ function withDefaults(json) {
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show");
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2600); }
 
+// Opened through the AiSys local site (/cameras): its calls go to /cameras/api/..., passed on to web_ui.py.
+const BASE = location.pathname.startsWith("/cameras") ? "/cameras" : "";
+if (BASE) $("backLive").hidden = false;    // back to the local site's Latest Happenings
 async function api(path, body) {
-  const r = await fetch(path, body === undefined ? {} :
+  const r = await fetch(BASE + path, body === undefined ? {} :
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if ((r.headers.get("Content-Type") || "").startsWith("image/")) {
     if (!r.ok) throw new Error("picture failed"); return r.blob();
@@ -415,11 +429,23 @@ $("btnDiscover").onclick = async () => {
   b.disabled = false; b.textContent = "Discover";
 };
 
-async function identifyCam(dev, btn) {
+$("btnIdentifyIp").onclick = () => identifyCam({ ip: $("ipAddr").value.trim(), ports: [], onvif_xaddrs: [] },
+  $("btnIdentifyIp"), $("ipUser"), $("ipPass"));
+$("ipAddr").addEventListener("keydown", e => { if (e.key === "Enter") $("btnIdentifyIp").click(); });
+
+async function identifyCam(dev, btn, userEl = $("discUser"), passEl = $("discPass")) {
   const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = `${esc(dev.ip)} <small>identifying… (up to 30 s)</small>`;
   try {
     const d = await api("/api/identify", { ip: dev.ip, ports: dev.ports, onvif_xaddrs: dev.onvif_xaddrs,
-                                            username: $("discUser").value, password: $("discPass").value });
+                                            username: userEl.value, password: passEl.value });
+    if (d.need_login) {
+      $("result").className = "";
+      $("result").innerHTML = `<div><b>${esc(dev.ip)}: login needed</b></div><div>${esc(d.note)}</div>`;
+      toast(d.locked ? "Camera login locked" : "Enter the camera's login and press Identify again");
+      userEl.focus();
+      btn.disabled = false; btn.innerHTML = old;
+      return;
+    }
     const i = d.identify;
     const file = i.name + ".json";
     setCurrent({ where: "out", file, json: d.json, report: null });
@@ -429,7 +455,8 @@ async function identifyCam(dev, btn) {
       ` · ONVIF ${i.onvif_port ? "port " + i.onvif_port + " (login " + esc(i.onvif_login) + ")" : "no"}</div>` +
       `<div>${streams.map(esc).join("<br>") || "no streams found"}</div>` +
       (i.notes.length ? `<ul class="issues">${i.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : "") +
-      `<div class="muted">New JSON opened as ${esc(file)} (not saved). Check the name, then Run test to measure the streams.</div>`;
+      `<div class="muted">Login: ${d.login_from === "default" ? "default (" + esc(d.login_user) + ")" : "yours"}. ` +
+      `New JSON opened as ${esc(file)} (not saved). Check the name, then Run test to measure the streams.</div>`;
   } catch (e) { toast(e.message); }
   btn.disabled = false; btn.innerHTML = old;
 }

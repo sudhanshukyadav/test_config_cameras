@@ -5,9 +5,12 @@
     python web_ui.py --config-dir D:\\cams --port 8091
 
 Only listens on 127.0.0.1. Never writes into the config dir; saves go to out/.
+Also reached through the AiSys local site at http://localhost:8080/cameras (admin, central PC only):
+the page then calls /cameras/api/... and the local site passes them on to this server.
 """
 import argparse
 import contextlib
+import ipaddress
 import io
 import json
 import os
@@ -188,6 +191,28 @@ def snapshot(cam, which, encoder=None):
     return data
 
 
+def identify_ip(b):
+    """Identify a camera by its IP. No login given: the default logins first (discover.find_login);
+    none works -> {need_login: True, note}. The login used goes into the new JSON."""
+    ip = str(b.get("ip") or "").strip()
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        raise ValueError(f"not an IP address: {ip!r}")
+    user, password = str(b.get("username") or ""), str(b.get("password") or "")
+    ports, xaddrs = b.get("ports") or [], b.get("onvif_xaddrs") or []
+    login_from = "yours"
+    if not user and not password:
+        found = dc.find_login(ip, ports, xaddrs)
+        if found["login"] is None:
+            return {"need_login": True, "locked": found["locked"], "note": found["note"], "tried": found["tried"]}
+        user, password = found["login"]
+        login_from = "default"
+    ident = dc.identify(ip, user, password, ports, xaddrs, None)
+    return {"identify": ident, "login_from": login_from, "login_user": user,
+            "json": dc.to_camera_json(ident, user, password)}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep the console to our own short log lines
         pass
@@ -249,10 +274,7 @@ class Handler(BaseHTTPRequestHandler):
                     d["known"] = f"{k['where']}/{k['file']}" if k else None
                 return self._send(200, {"subnet": b.get("subnet") or dc.default_subnet(), "devices": devices})
             if u.path == "/api/identify":
-                ident = dc.identify(b["ip"], b.get("username", ""), b.get("password", ""),
-                                    b.get("ports") or [], b.get("onvif_xaddrs") or [], None)
-                return self._send(200, {"identify": ident,
-                                        "json": dc.to_camera_json(ident, b.get("username", ""), b.get("password", ""))})
+                return self._send(200, identify_ip(b))
             if u.path == "/api/snapshot":
                 return self._send(200, snapshot(b["camera"], b.get("which", "sub"), b.get("encoder")), "image/jpeg")
             return self._send(404, {"error": "not found"})

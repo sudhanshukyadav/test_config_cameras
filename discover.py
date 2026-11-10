@@ -11,7 +11,9 @@ How a camera is found and identified:
    and the RTSP address of each stream (GetStreamUri) - no guessing of paths needed.
 3. Dahua CGI check (magicBox.cgi), because Dahua OEM cameras often call themselves "General".
 4. No ONVIF: try a short list of RTSP paths used by common makers.
-Logins tried: only the one you give, plus no login. Nothing else is guessed.
+Logins: the one you give (plus no login). Given none, the usual factory logins are tried first,
+at most 3 per camera, one cheap check each (ONVIF, else Dahua CGI), stopping at the first that works
+or when the camera reports a lock; then you are asked (find_login, default_logins.json).
 After this, run the camera test (test_protocol.py --test, or Run test on the page) to measure
 the streams and fill in the encoder values.
 """
@@ -235,6 +237,107 @@ def _dahua_cgi(ip: str, port: int, user: str, password: str):
         if r.status_code == 200 and "type=" in r.text:
             return r.text.strip().split("=", 1)[1]
     return None
+
+
+# Factory logins tried when none is given (most known cameras keep them). Your own common logins go
+# into default_logins.json next to this file (git-ignored), tried before these:
+#   {"logins": [["admin", "plant-pass"], ["admin", "admin"]], "max_tries": 3}
+DEFAULT_LOGINS = [("admin", ""), ("admin", "admin"), ("admin", "12345")]
+MAX_LOGIN_TRIES = 3     # many cameras lock the login after ~5 wrong passwords (Dahua: 30 min)
+
+
+def default_logins() -> tuple[list, int]:
+    logins, tries = [], MAX_LOGIN_TRIES
+    path = os.path.join(tp.SCRIPT_DIR, "default_logins.json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            logins = [(str(x[0]), str(x[1]) if len(x) > 1 else "") for x in cfg.get("logins", []) if x]
+            tries = int(cfg.get("max_tries", tries))
+        except (OSError, ValueError, TypeError, IndexError) as e:
+            tp.log("login", f"default_logins.json unreadable ({e}); using the built-in list")
+    out = list(dict.fromkeys(logins + DEFAULT_LOGINS))
+    return out, max(1, min(tries, len(out)))
+
+
+def _onvif_login(ip: str, port: int, user: str, password: str) -> str:
+    """One ONVIF call with this login: 'ok', 'bad', 'locked' or 'unknown'."""
+    signer = object.__new__(tp.ONVIFSoapDriver)          # only to build the WS-Security header
+    signer.user, signer.password = user, password
+    body = (f'<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+            f'xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Header>{signer._build_wsse_header()}</s:Header>'
+            f'<s:Body><tds:GetDeviceInformation/></s:Body></s:Envelope>')
+    try:
+        r = requests.post(f"http://{ip}:{port}/onvif/device_service", data=body.encode(),
+                          headers={"Content-Type": "application/soap+xml; charset=utf-8"}, timeout=4)
+    except requests.RequestException:
+        return "unknown"
+    text = r.text.lower()
+    if "lock" in text:
+        return "locked"
+    if r.status_code == 200 and "getdeviceinformationresponse" in text:
+        return "ok"
+    if "notauthorized" in text or r.status_code in (400, 401, 403):
+        return "bad"
+    return "unknown"
+
+
+def _dahua_login(ip: str, port: int, user: str, password: str) -> str:
+    """One Dahua CGI call with this login: 'ok', 'bad', 'locked' or 'unknown' (not a Dahua)."""
+    try:
+        r = requests.get(f"http://{ip}:{port}/cgi-bin/magicBox.cgi", params={"action": "getDeviceType"},
+                         auth=HTTPDigestAuth(user, password), timeout=4)
+    except requests.RequestException:
+        return "unknown"
+    if "lock" in r.text.lower():
+        return "locked"
+    if r.status_code == 200 and "type=" in r.text:
+        return "ok"
+    return "bad" if r.status_code == 401 else "unknown"
+
+
+def _answers_dahua_cgi(ip: str, port: int) -> bool:
+    """Dahua's magicBox CGI is there (asked without a login, so no failed login is counted)."""
+    try:
+        r = requests.get(f"http://{ip}:{port}/cgi-bin/magicBox.cgi", params={"action": "getDeviceType"}, timeout=3)
+    except requests.RequestException:
+        return False
+    return r.status_code == 401 or (r.status_code == 200 and "type=" in r.text)
+
+
+def find_login(ip: str, ports=None, onvif_xaddrs=None) -> dict:
+    """Tries the default logins on a camera, one cheap check each, stopping at the first that works.
+    Returns {login: (user, password) or None, tried, locked, how, note}."""
+    hint = [urlparse(x).port or 80 for x in (onvif_xaddrs or [])] + [p for p in (ports or []) if p in ONVIF_PORTS]
+    oport = _find_onvif_port(ip, hint)
+    check, how = None, None
+    if oport:
+        check, how = (lambda u, pw: _onvif_login(ip, oport, u, pw)), "onvif"
+    elif _answers_dahua_cgi(ip, 80):
+        check, how = (lambda u, pw: _dahua_login(ip, 80, u, pw)), "dahua"
+    res = {"login": None, "tried": 0, "locked": False, "how": how, "note": ""}
+    if check is None:
+        res["note"] = "the camera answers neither ONVIF nor Dahua CGI: give its login"
+        return res
+    logins, tries = default_logins()
+    for user, password in logins[:tries]:
+        res["tried"] += 1
+        state = check(user, password)
+        tp.log(ip, f"default login {res['tried']}/{tries} via {how}: {state}")
+        if state == "ok":
+            res["login"] = (user, password)
+            return res
+        if state == "locked":
+            res["locked"] = True
+            res["note"] = "the camera has locked its login (too many wrong passwords): wait about 30 minutes"
+            return res
+        if state == "unknown":
+            res["note"] = f"the camera stopped answering {how}; give its login"
+            return res
+        time.sleep(1)
+    res["note"] = f"none of the {res['tried']} default logins worked: give the camera's login"
+    return res
 
 
 def _rtsp_ok(ip: str, port: int, path: str, user: str, password: str):
