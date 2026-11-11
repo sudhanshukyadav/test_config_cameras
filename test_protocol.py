@@ -596,7 +596,8 @@ JSON_TEMPLATE = {
     "motion": {
         "enabled": True, "heartbeat_interval_sec": 0.0, "grid_rows": 6, "grid_cols": 8,
         "motion_threshold_min": 1800, "max_lighting_ratio": 0.6, "initial_snap_delay_sec": 1.0,
-        "diff_multiplier_threshold": 10.0, "post_roll_buffer_sec": 3.0, "cooldown_period_sec": 10.0,
+        "diff_multiplier_threshold": 10.0, "post_roll_buffer_sec": 3.0, "pre_roll_sec": 0.0,
+        "cooldown_period_sec": 10.0,
         "bg_scan_frame_step": 2, "draw_motion_box": True, "exclude_zones": [], "use_roi": False,
         "roi_crop": [0.2, 0.2, 0.8, 0.8], "min_sharpness": 100, "min_brightness": 50,
         "max_brightness": 220},
