@@ -311,7 +311,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 <script>
 const $ = (id) => document.getElementById(id);
 const CHOICES = {
-  vendor: ["dahua", "generic"], ptz_protocol: ["dahua_cgi", "onvif_soap", "none"],
+  vendor: ["dahua", "generic"], ptz_protocol: ["dahua_cgi", "onvif_soap", "ws_soap", "none"],
   rtsp_transport: ["tcp", "udp"], codec: ["H.264", "H.265"], bitrate_type: ["CBR", "VBR"],
   day_night_mode: ["auto", "day", "night"], white_balance_mode: ["auto", "manual", "indoor", "outdoor"],
 };
@@ -336,7 +336,10 @@ const HINTS = {
   "camera.name": "camera name in logs and folders",
   "camera.site": "site (location) of the camera, e.g. HUB: camera ID = site_camera",
   "camera.vendor": "dahua = Dahua RTSP/CGI paths; generic = stream paths below",
-  "camera.ptz_protocol": "dahua_cgi, onvif_soap or none",
+  "camera.ptz_protocol": "dahua_cgi, onvif_soap, ws_soap (SOAP over the camera page's WebSocket, e.g. FLP Gallery) or none",
+  "camera.ws_port": "ws_soap: the camera page's WebSocket port (12351)",
+  "camera.ws_userid": "ws_soap: the userid token the camera page sends with each command",
+  "camera.ws_passwd": "ws_soap: the passwd token the camera page sends with each command",
   "camera.host": "camera IP address",
   "camera.port": "RTSP port (usually 554)",
   "camera.http_port": "web / CGI / ONVIF port (Dahua 80, cheap cameras often 8899)",
