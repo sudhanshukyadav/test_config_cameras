@@ -359,11 +359,38 @@ class ONVIFSoapDriver:
         self.auth_ok = False     # True once GetProfiles succeeded
         self.auth_mode = "wsse"  # "wsse" or "none" (camera accepts calls without login)
         self.has_ptz = False
+        self.pw_type = "digest"  # "digest", or "text" for cameras that only accept PasswordText
+        self.clock_offset = self._camera_clock_offset()
         self._discover_services()
         self._discover_profile()
 
+    def _camera_clock_offset(self) -> datetime.timedelta:
+        """Camera clock minus PC clock. WS-Security logins carry a timestamp; a camera whose clock is off
+        by more than a few seconds rejects a correct password as NotAuthorized. Asked without a login."""
+        body = ('<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">'
+                '<s:Body><GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body></s:Envelope>')
+        try:
+            r = requests.post(self.endpoint, data=body, timeout=2.5,
+                              headers={"Content-Type": "application/soap+xml; charset=utf-8"})
+            utc = re.search(r"UTCDateTime>(.*?)</[\w]*:?UTCDateTime", r.text, re.S)
+            if not utc:
+                return datetime.timedelta(0)
+            get = lambda tag: int(re.search(rf"<[\w]*:?{tag}>(\d+)<", utc.group(1)).group(1))  # noqa: E731
+            cam = datetime.datetime(get("Year"), get("Month"), get("Day"), get("Hour"), get("Minute"),
+                                    get("Second"), tzinfo=datetime.timezone.utc)
+            off = cam - datetime.datetime.now(datetime.timezone.utc)
+            return off if abs(off.total_seconds()) > 5 else datetime.timedelta(0)
+        except Exception:
+            return datetime.timedelta(0)
+
     def _build_wsse_header(self) -> str:
-        created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        if getattr(self, "pw_type", "digest") == "text":
+            return f"""<wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+            <wsse:UsernameToken><wsse:Username>{self.user}</wsse:Username>
+                <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-1.0.xsd#PasswordText">{self.password}</wsse:Password>
+            </wsse:UsernameToken></wsse:Security>"""
+        now = datetime.datetime.now(datetime.timezone.utc) + getattr(self, "clock_offset", datetime.timedelta(0))
+        created = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         nonce_raw = os.urandom(16)
         nonce_b64 = base64.b64encode(nonce_raw).decode("ascii")
         sha = hashlib.sha1()
@@ -401,8 +428,14 @@ class ONVIFSoapDriver:
         if op:          # the operation's name (SOAP 1.2 action); some cameras need it to find the operation
             headers["Content-Type"] += f'; action="{self.SOAP_NS[op.group(1)]}/{op.group(2)}"'
         self.last_answer = None
-        modes = [True, False] if self.auth_mode == "wsse" else [False]
-        for with_auth in modes:
+        # login digest -> login text (only until one works) -> no login
+        modes = [(True, self.pw_type)] if self.auth_mode == "wsse" else []
+        if self.auth_mode == "wsse" and not self.auth_ok and self.pw_type == "digest" and self.password:
+            modes.append((True, "text"))
+        modes.append((False, None))
+        kept_type = self.pw_type
+        for with_auth, pw_type in modes:
+            self.pw_type = pw_type or kept_type
             try:
                 res = requests.post(url, data=self._envelope(body_xml, with_auth), headers=headers, timeout=timeout)
             except Exception as e:
@@ -410,6 +443,8 @@ class ONVIFSoapDriver:
                 return None
             if res.status_code == 200:
                 self.last_error = None
+                if not with_auth:
+                    self.pw_type = kept_type
                 if not with_auth and self.auth_mode != "none":
                     self.auth_mode = "none"   # login rejected but anonymous works: stop sending it
                 return res
@@ -418,6 +453,7 @@ class ONVIFSoapDriver:
             self.last_answer = soap_body(res.text)
             if "NotAuthorized" not in res.text:
                 break                         # a real error, not a login problem
+        self.pw_type = kept_type
         return None
 
     def _discover_services(self):
@@ -1186,4 +1222,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()

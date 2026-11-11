@@ -322,6 +322,8 @@ def _onvif_login(ip: str, port: int, user: str, password: str) -> str:
     """One ONVIF call with this login: 'ok', 'bad', 'locked' or 'unknown'."""
     signer = object.__new__(tp.ONVIFSoapDriver)          # only to build the WS-Security header
     signer.user, signer.password = user, password
+    signer.endpoint = f"http://{ip}:{port}/onvif/device_service"
+    signer.clock_offset = signer._camera_clock_offset()   # a camera clock that is off rejects a right password
     body = (f'<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
             f'xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Header>{signer._build_wsse_header()}</s:Header>'
             f'<s:Body><tds:GetDeviceInformation/></s:Body></s:Envelope>')
