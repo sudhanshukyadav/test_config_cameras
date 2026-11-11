@@ -490,7 +490,8 @@ def snapshot(cam, which, encoder=None):
     fps = float(enc.get("fps") or 0) or 15.0
     gop = float(enc.get("gop_keyframe_interval") or 0) or fps
     read_s = min(8.0, max(0.5, gop / fps + 0.5))
-    tmp = os.path.join(tp.OUT_DIR, f"_snap_{cfg['name']}.jpg")
+    # own file per picture: two pictures of one camera (live refresh + a test) must not share a file
+    tmp = os.path.join(tp.OUT_DIR, f"_snap_{cfg['name']}_{threading.get_ident()}_{time.time_ns()}.jpg")
     os.makedirs(tp.OUT_DIR, exist_ok=True)
     cmd = ["ffmpeg", "-v", "error", "-y", "-rtsp_transport", "tcp", "-timeout", "5000000",
            "-i", tp.rtsp_url(cfg, path), "-t", f"{read_s:.1f}", "-an", "-vf", "scale='min(1280,iw)':-2",
@@ -513,9 +514,12 @@ def snapshot(cam, which, encoder=None):
                 raise RuntimeError("camera refused the stream 3 times. It allows only a few streams at once "
                                    "(multy.py uses one, a running test uses more). Wait a few seconds and refresh.")
             raise RuntimeError(err.splitlines()[-1][-200:] if err else "no frame")
-    with open(tmp, "rb") as f:
-        data = f.read()
-    os.remove(tmp)
+        try:                       # read and remove while still holding the camera's lock
+            with open(tmp, "rb") as f:
+                data = f.read()
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
     return data
 
 
