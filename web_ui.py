@@ -330,7 +330,8 @@ def get_driver(cam):
     cfg = tp.standardize_config(cam)
     if cfg["ptz_protocol"] in ("none", "off", "no"):
         raise ValueError(f"{cfg['name']} has ptz_protocol 'none'")
-    key = (cfg["host"], cfg["http_port"], cfg["username"], cfg["password"], cfg["ptz_protocol"])
+    key = (cfg["host"], cfg["http_port"], cfg["username"], cfg["password"], cfg["ptz_protocol"],
+           cfg["ws_port"], cfg["ws_userid"], cfg["ws_passwd"])
     with _drivers_lock:
         if key not in _drivers:
             _drivers[key] = tp.build_driver(cfg)
@@ -359,7 +360,8 @@ def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
     if speed is not None:
         drv.speed = max(0.1, min(1.0, float(speed)))
     ok, extra = False, {}
-    if action in ("left", "right", "up", "down", "zoom_in", "zoom_out", "focus_near", "focus_far"):
+    if action in ("left", "right", "up", "down", "zoom_in", "zoom_out", "focus_near", "focus_far",
+                  "iris_open", "iris_close"):
         ok = drv.set_ptz(action)
         # Safety: stop by itself after 4 s if the page never sends stop (tab closed, lost mouseup).
         old = _watchdogs.pop(id(drv), None)
@@ -389,6 +391,10 @@ def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
                 tp.log(name, f"ptz set_preset: the camera keeps this point as its preset {drv.last_preset_token}")
         else:
             ok = drv.set_preset(int(preset))
+    elif action == "clear_preset":
+        if not hasattr(drv, "clear_preset"):
+            raise ValueError("delete preset is only available on ws_soap cameras so far")
+        ok = drv.clear_preset(int(preset))
     elif action == "absolute":                       # go to typed pan / tilt / zoom (ONVIF generic spaces)
         if not isinstance(drv, tp.ONVIFSoapDriver):
             raise ValueError("go to a typed position works on ONVIF PTZ cameras only (this one uses Dahua CGI)")

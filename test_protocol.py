@@ -13,6 +13,7 @@ import select
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -133,6 +134,10 @@ def standardize_config(cam: dict) -> dict:
         "channel": cam.get("channel", 1),
         "onvif_profile": cam.get("onvif_profile", "Profile_1"),
         "stream_path": cam.get("main_stream_path", f"/cam/realmonitor?channel={cam.get('channel', 1)}&subtype=0"),
+        # ws_soap cameras (camera web page sends SOAP over a WebSocket): port and the page's fixed login tokens
+        "ws_port": cam.get("ws_port", 12351),
+        "ws_userid": cam.get("ws_userid", ""),
+        "ws_passwd": cam.get("ws_passwd", ""),
     }
 
 
@@ -594,6 +599,171 @@ class ONVIFSoapDriver:
         return coords, moving
 
 
+class WebSocketSoapDriver:
+    """PTZ for cameras whose own web page sends SOAP over a WebSocket (ws://<ip>:12351/), e.g. the
+    FLP Gallery camera. Commands were read from the camera page's traffic; ws_userid / ws_passwd are
+    the fixed tokens that page sends with every command.
+
+    Captured: zoomwide, zoomtele, stop, FocusNear/FarAutoOff, IrisOpen/CloseAutoOff,
+    callpreset, setpreset (flag 1), clearpreset. Pan / tilt not captured yet."""
+
+    COMMANDS = {"zoom_in": "zoomtele", "zoom_out": "zoomwide",
+                "focus_near": "FocusNearAutoOff", "focus_far": "FocusFarAutoOff",
+                "iris_open": "IrisOpenAutoOff", "iris_close": "IrisCloseAutoOff"}
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.display_name = cfg.get("name", "WS SOAP Camera")
+        self.host = cfg["host"]
+        self.port = int(cfg.get("ws_port") or 12351)
+        self.userid = cfg.get("ws_userid", "")
+        self.passwd = cfg.get("ws_passwd", "")
+        self.speed = 0.5
+        self.last_error = None
+        self.last_answer = None
+        self._sock = None
+        self._lock = threading.Lock()
+
+    # --- minimal WebSocket client (RFC 6455: text frames, client side masked) ---
+    def _connect(self):
+        import socket
+        s = socket.create_connection((self.host, self.port), timeout=3)
+        key = base64.b64encode(os.urandom(16)).decode()
+        s.sendall((f"GET / HTTP/1.1\r\nHost: {self.host}:{self.port}\r\nUpgrade: websocket\r\n"
+                   f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                   f"Origin: http://{self.host}\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            head += chunk
+        status = head.split(b"\r\n", 1)[0].decode(errors="ignore")
+        if " 101" not in status:
+            s.close()
+            raise ConnectionError(f"WebSocket refused: {status or 'no answer'}")
+        self._sock = s
+
+    def _send_frame(self, text: str):
+        data = text.encode("utf-8")
+        n = len(data)
+        head = bytearray([0x81])
+        if n < 126:
+            head.append(0x80 | n)
+        elif n < 65536:
+            head += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else:
+            head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        mask = os.urandom(4)
+        self._sock.sendall(bytes(head) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def _read_frame(self, timeout: float):
+        """One reply frame as text, or None if the camera sends nothing within timeout."""
+        import socket
+        self._sock.settimeout(timeout)
+        try:
+            h = self._sock.recv(2)
+            if len(h) < 2:
+                return None
+            n = h[1] & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._sock.recv(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self._sock.recv(8), "big")
+            body = b""
+            while len(body) < n:
+                chunk = self._sock.recv(n - len(body))
+                if not chunk:
+                    break
+                body += chunk
+            return body.decode("utf-8", errors="ignore")
+        except socket.timeout:
+            return None
+        finally:
+            self._sock.settimeout(3)
+
+    def _link_alive(self) -> bool:
+        """False when the camera has closed the connection (an idle link is often dropped). Without this
+        check the next command would go into the dead socket and be lost while looking sent."""
+        try:
+            readable, _, _ = select.select([self._sock], [], [], 0)
+            if not readable:
+                return True
+            if self._sock.recv(1, socket.MSG_PEEK) == b"":
+                return False
+            self._read_frame(0.1)          # an unread message from the camera: take it off the line
+            return True
+        except OSError:
+            return False
+
+    def _command(self, inner: str) -> bool:
+        """Sends <xml>inner</xml> exactly like the camera page does. Reconnects once if the link dropped."""
+        msg = ('<?xml version="1.0"?><soap:Envelope xmlns:soap="http://www.w3.org/2001/12/soap-envelope">'
+               f"<soap:Header>\t<userid>{self.userid}</userid>\t<passwd>{self.passwd}</passwd></soap:Header>"
+               f"<soap:Body><xml>{inner}</xml></soap:Body></soap:Envelope>")
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if self._sock is not None and not self._link_alive():
+                        self._sock.close()
+                        self._sock = None
+                    if self._sock is None:
+                        self._connect()
+                    self._send_frame(msg)
+                    self.last_answer = self._read_frame(0.3)   # the camera may or may not answer
+                    self.last_error = None
+                    return True
+                except Exception as e:
+                    self.last_error = f"{type(e).__name__}: {e}"
+                    try:
+                        self._sock.close()
+                    except Exception:
+                        pass
+                    self._sock = None
+            return False
+
+    # --- same interface as the other drivers ---
+    def read_ptz(self) -> tuple[dict, bool]:
+        # position reading is not known for this camera
+        return {"x": 0.0, "y": 0.0, "z": 0.0, "focus": 0.0, "zoom_val": 0.0, "preset": 0}, False
+
+    def set_ptz(self, direction: str, speed: float = None) -> bool:
+        direction = direction.lower().strip()
+        if direction == "stop":
+            return self.stop()
+        cmd = self.COMMANDS.get(direction)
+        if not cmd:
+            self.last_answer = None
+            self.last_error = f"'{direction}' not known for this camera yet (pan / tilt command not captured)"
+            return False
+        return self._command(f"<cmd>{cmd}</cmd>")
+
+    def stop(self) -> bool:
+        return self._command("<cmd>stop</cmd>")
+
+    def goto_preset(self, preset_id: int) -> bool:
+        return self._command(f"<cmd>callpreset</cmd><preset>{int(preset_id)}</preset>")
+
+    def set_preset(self, preset_id: int) -> bool:
+        # flag 1 exactly as the camera page sends it (meaning not known)
+        return self._command(f"<cmd>setpreset</cmd><preset>{int(preset_id)}</preset><flag>1</flag>")
+
+    def clear_preset(self, preset_id: int) -> bool:
+        return self._command(f"<cmd>clearpreset</cmd><preset>{int(preset_id)}</preset>")
+
+    def trigger_autofocus(self) -> bool:
+        self.last_error = "autofocus command not captured yet"
+        return False
+
+    def init_lens(self) -> bool:
+        self.last_error = "lens init command not captured yet"
+        return False
+
+    def wait_until_idle(self, timeout: float = 8.0) -> tuple[dict, bool]:
+        time.sleep(min(timeout, 3.0))       # no position reading: give the move time to finish
+        return self.read_ptz()
+
+
 def build_driver(cam_cfg: dict):
     """Instantiates driver based on the verified camera configuration.
     Returns None when the camera has no PTZ (ptz_protocol 'none')."""
@@ -602,6 +772,8 @@ def build_driver(cam_cfg: dict):
         return None
     if "dahua" in proto or proto == "dahua_cgi":
         return DahuaCGIDriver(cam_cfg)
+    if proto == "ws_soap":
+        return WebSocketSoapDriver(cam_cfg)
     return ONVIFSoapDriver(cam_cfg)
 
 
