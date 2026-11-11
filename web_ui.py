@@ -24,7 +24,6 @@ import camset
 import discover as dc
 import camflip
 import osd
-import requests
 import test_protocol as tp
 
 WEB_DIR = os.path.join(tp.SCRIPT_DIR, "web")
@@ -476,30 +475,8 @@ def absmove_test(cam):
     return {"ok": verdict.startswith("YES"), "verdict": verdict, "steps": steps, "pictures": pics}
 
 
-def http_snapshot(cam):
-    """The camera's own JPEG address (snapshot_path from find_streams.py): well under a second, uses no
-    RTSP slot and no keyframe wait. None when the camera has none or it fails (then RTSP is used)."""
-    path = cam.get("snapshot_path")
-    if not path:
-        return None
-    from requests.auth import HTTPBasicAuth, HTTPDigestAuth
-    user, pw = cam.get("username", ""), cam.get("password", "")
-    auth = {"digest": HTTPDigestAuth(user, pw), "basic": HTTPBasicAuth(user, pw)}.get(cam.get("snapshot_auth"))
-    url = f"http://{cam['host']}:{cam.get('snapshot_port', 80)}{path}"
-    try:
-        r = requests.get(url, auth=auth, timeout=4)
-    except requests.RequestException:
-        return None
-    return r.content if r.status_code == 200 and r.content[:2] == b"\xff\xd8" else None
-
-
 def snapshot(cam, which, encoder=None):
-    """One up-to-date JPEG frame: the camera's snapshot address when it has one, else the main or
-    sub stream (ffmpeg, like the copy test)."""
-    if which == "sub":
-        data = http_snapshot(cam)
-        if data:
-            return data
+    """One up-to-date JPEG frame from the main or sub stream (ffmpeg, like the copy test)."""
     fresh_cam = {"_encoder": encoder or {}}
     cfg = tp.standardize_config(cam)
     if "main_stream_subtype" in cam or cfg["vendor"] == "dahua":
