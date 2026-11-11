@@ -583,7 +583,7 @@ GENERIC_RTSP_PATHS = ["/live/ch0", "/live/ch1", "/onvif1", "/onvif2", "/11", "/1
 JSON_TEMPLATE = {
     "camera": {"name": "", "site": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
                "http_port": 80, "username": "admin", "password": "",
-               "invert_stream": False, "ptz_markers": {}},
+               "flip_stream": False, "ptz_markers": {}},
     "connection": {"rtsp_transport": "tcp", "buffer_size": 1},
     "sensor_hardware_properties": {
         "brightness": 50, "contrast": 50, "saturation": 50, "sharpness": 40,
@@ -870,7 +870,9 @@ def build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, repo
                 "ptz_protocol": ptz_protocol, "host": cfg["host"], "port": cfg["port"],
                 "http_port": cfg["http_port"], "username": cfg["username"],
                 "password": cfg["password"]})
-    cam.setdefault("invert_stream", False)
+    if "invert_stream" in cam:                      # old name of flip_stream
+        cam.setdefault("flip_stream", bool(cam.pop("invert_stream")))
+    cam.setdefault("flip_stream", False)
     if main and main.get("subtype") is not None:
         cam["channel"] = cfg.get("channel", 1)
         cam["main_stream_subtype"] = main["subtype"]

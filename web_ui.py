@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 import camset
 import discover as dc
+import camflip
 import osd
 import test_protocol as tp
 
@@ -281,6 +282,10 @@ def save_all(data) -> dict:
     site_u = str((data.get("camera") or {}).get("site") or "").strip().upper()
     edge_raw = next((n.get("base_path") for n in pc.get("edge_nodes", []) if str(n.get("site_name", "")).upper() == site_u), None)
     data = dict(data)
+    cam_d = data["camera"] = dict(data.get("camera") or {})
+    if "invert_stream" in cam_d:                     # old name: written as flip_stream from now on
+        cam_d.setdefault("flip_stream", bool(cam_d.get("invert_stream")))
+        cam_d.pop("invert_stream", None)
     data["storage"] = {"central_base": (pc.get("central_storage") or {}).get("mount_path"), "edge_base": edge_raw}
     for where, folder in (("central", chk["central"]), ("edge", chk["edge"])):
         if not folder:
@@ -514,6 +519,61 @@ def snapshot(cam, which, encoder=None):
     return data
 
 
+def _small_gray(jpeg: bytes):
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_GRAYSCALE)
+    return None if img is None else cv2.resize(img, (64, 36), interpolation=cv2.INTER_AREA).astype("float32")
+
+
+def what_changed(before: bytes, after: bytes) -> str:
+    """How the camera's picture changed: "turned" (180°: flip + mirror), "flip" (top-bottom only), "mirror"
+    (left-right only), "same", or "" (cannot tell: scene changed / too symmetric / no OpenCV)."""
+    try:
+        import numpy as np
+        a, b = _small_gray(before), _small_gray(after)
+        if a is None or b is None:
+            return ""
+        d = {"same": a, "turned": a[::-1, ::-1], "flip": a[::-1, :], "mirror": a[:, ::-1]}
+        err = sorted((float(np.mean(np.abs(v - b))), k) for k, v in d.items())
+        return err[0][1] if err[0][0] < 0.7 * err[1][0] else ""
+    except Exception:
+        return ""
+
+
+def camera_flip(data: dict, action: str, axis: str = "v") -> dict:
+    """Flip vertical / Flip horizontal on the PTZ page: written into the camera (camflip.py). After on / off the
+    PICTURE is compared before and after, and the answer says what the camera really did."""
+    if action not in ("on", "off"):
+        return camflip.handle(data, action, axis)
+    cam = data.get("camera") or {}
+    try:
+        before = snapshot(cam, "sub", data.get("stream_encoder_properties"))
+    except Exception:
+        before = None
+    r = camflip.handle(data, action, axis)
+    if not r.get("ok") or before is None:
+        return r
+    time.sleep(2.5)
+    try:
+        after = snapshot(cam, "sub", data.get("stream_encoder_properties"))
+    except Exception:
+        return r
+    r["picture"] = got = what_changed(before, after)
+    want = "flip" if axis != "h" else "mirror"
+    note = {"turned": "the camera turned the picture 180° (vertical AND horizontal together)",
+            "mirror": "the camera flipped the picture horizontally (left-right)",
+            "flip": "the camera flipped the picture vertically (top-bottom)",
+            "same": "the picture did not change",
+            "": "could not tell what changed (the scene moved); look at the picture"}[got]
+    r["log"].append("picture check: " + note)
+    if got == "same":
+        r["ok"] = False
+    r["as_asked"] = got == want
+    tp.log(osd.camera_id(data), f"flip {'horizontal' if axis == 'h' else 'vertical'} {action}: {note}")
+    return r
+
+
 def known_login(ip: str):
     """{login, file} from a camera JSON with this IP: central's base, the edge bases, out/, the old
     edge_worker files (next to this repo, or --config-dir)."""
@@ -651,6 +711,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"subnet": b.get("subnet") or dc.default_subnet(), "devices": devices})
             if u.path == "/api/identify":
                 return self._send(200, identify_ip(b))
+            if u.path == "/api/camflip":               # flip@camera: the camera's own flip, set at once (no Save)
+                return self._send(200, camera_flip(b["json"], b.get("action", "read"), b.get("axis", "v")))
             if u.path == "/api/osd":
                 return self._send(200, osd.handle(b["json"], b.get("action", "read")))
             if u.path == "/api/snapshot":

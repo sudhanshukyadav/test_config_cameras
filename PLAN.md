@@ -27,7 +27,7 @@ actually sends **2304x1296, 15 fps, GOP 90** (measured 2026-11-08).
   are tuning values that can't be measured: keep them from the existing camera JSON if one is given,
   otherwise use defaults from a template.
 - The keys multy.py reads must be present: `camera.host/port/username/password/vendor`,
-  stream paths (or Dahua `channel` + `main_stream_subtype`/`sub_stream_subtype`), `invert_stream`,
+  stream paths (or Dahua `channel` + `main_stream_subtype`/`sub_stream_subtype`), `flip_stream`,
   `http_port`, `ptz_protocol`, `connection.rtsp_transport`, `stream_encoder_properties.fps /
   main_stream_resolution / sub_stream_resolution`, and the `motion` keys.
 - Written to `C:\Users\sudha\camtest\out\<name>.json` (git-ignored, because it holds the password),
@@ -195,3 +195,22 @@ python C:\Users\sudha\camtest\test_protocol.py gate --test
   it, or identify fails for any other reason.
 - A model with `ptz_position: false` (e.g. YM800S5: shows P/T/Z on its OSD, reports 0,0,0 over ONVIF) gets
   `camera.ptz_position: false` in its JSON and a note; its events are named P00T00Z00.
+
+## Orientation, motion while configuring, events (decisions 2026-11-11)
+
+- **Flip:** set on the camera itself when it can: **flip@camera** button on the PTZ page (camflip.py; sets the
+  camera's own flip at once, Dahua VideoInOptions Flip / ONVIF VideoSourceConfiguration Rotate; no Save). `camera.flip_stream` (page 1 field only, unrelated to flip@camera;
+  old name `invert_stream`, still read) only when the camera cannot; used sparingly, never together with the
+  camera's own Flip. Then multy.py flips snapshots, motion and live, clips get a 180° tag, the camera's OSD is
+  switched off and the edge writes our date / title (unticking switches the camera's OSD back on). The view
+  in the tool always shows the picture as the camera sends it (red notice "flip_stream is ON"). How a camera
+  is mounted is irrelevant to the software; the installer decides. The edge never mirrors.
+- **Events:** an event starts above `motion_threshold_min`; once running it stays alive while the biggest
+  object is above `keep_alive_ratio` (default 0.25) of it, so a person walking away and coming back is one
+  event. `post_roll_buffer_sec` ends it, then `cooldown_period_sec` blocks new events: keep the cooldown
+  short (a few seconds), set per camera.
+- **Backlog:** lock events (no motion detection on the edge) for a camera without a PTZ position reading
+  while its configuration file is open in the tool, until the editing is finished (moving it, or switching
+  its OSD, made false events on FLP Gallery).
+- **Done 2026-11-11:** one term, "flip", on the page, in the manual and in the JSON (`flip_stream`; the old
+  `invert_stream` is still read and rewritten as `flip_stream` on Save). The edge only flips, never mirrors.
