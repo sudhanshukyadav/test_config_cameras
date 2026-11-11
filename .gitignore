@@ -2,3 +2,4 @@ out/
 __pycache__/
 *.pyc
 default_logins.json
+default_logins.json

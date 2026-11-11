@@ -70,6 +70,8 @@ input.locked { opacity: .65; }
 section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
 .hgroup[hidden] { display: none; }
+fieldset.loginpanel.ask { border-color: #e5534b !important; box-shadow: 0 0 0 2px rgba(229,83,75,.25); }
+.idrow button { width: 100%; }
 button, select, input, textarea { font: inherit; color: var(--text); }
 button { background: var(--pad); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
 button:hover { border-color: var(--accent); }
@@ -119,6 +121,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 .snap { position: relative; user-select: none; -webkit-user-select: none; }
 .snap img { pointer-events: none; -webkit-user-drag: none; }
 .snap img { width: 100%; height: 100%; object-fit: fill; display: block; }
+.snap.inv img { transform: rotate(180deg); }   /* invert_stream: shown as the edge records it (multy.py turns it) */
 .snap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .snap.drawing canvas { cursor: crosshair; }
 /* camera view: a floating window, dragged by its title bar, resized at its lower right corner */
@@ -170,7 +173,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 .viewpage .pad { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 30px); gap: 4px; }
 .viewpage .pad button { font-size: 14px; }
 .viewpage .zf { grid-template-columns: repeat(2, auto); }
-.viewpage .osdbox .row.obtn { flex-wrap: nowrap; gap: 4px; }
+.viewpage .osdbox .row.obtn { flex-wrap: wrap; gap: 4px; }
 .viewpage .osdbox .row.obtn button { padding: 4px 6px; font-size: 12px; white-space: nowrap; }
 .viewpage .snaprow { flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .ptzvals { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--muted); }
@@ -187,20 +190,12 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
   <a id="backLive" href="/live.html" class="hbtn" title="Back" style="text-decoration:none;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:5px 10px;color:inherit">&#9664; Back</a>
   <h1>Camera config and testing</h1>
   <select id="camPick" title="Open a saved camera (by camera ID)" style="width:auto;max-width:220px"></select>
-  <span class="hgroup" title="Add a camera by its IP: the default logins are tried first">
-    <input id="ipAddr" value="192.168." placeholder="camera IP" autocomplete="off" style="width:130px">
-    <span id="loginAsk" class="hgroup" hidden>
-      <input id="ipUser" value="admin" placeholder="login" autocomplete="off" style="width:90px">
-      <input id="ipPass" type="password" placeholder="password" autocomplete="off" style="width:100px">
-    </span>
-    <button id="btnIdentifyIp">Identify</button>
-  </span>
   <span class="spacer"></span>
   <span class="who" id="who">no camera loaded</span>
   <button id="btnTest">Run test</button>
   <button id="btnSave" class="primary" title="Save the camera JSON on central and on the edge, and write the OSD and the settings into the camera">Save to camera and edge</button>
 </header>
-<main><form id="form" onsubmit="return false"><p class="muted">Enter a camera's IP and press Identify, or open a saved camera.</p></form>
+<main><form id="form" onsubmit="return false"><p class="muted">Loading…</p></form>
 <section class="viewpage" id="viewWin" aria-label="View, PTZ and points of interest" hidden>
   <span id="viewWho" hidden></span>
   <div class="vbody">
@@ -210,6 +205,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
     <select id="snapWhich" style="width:auto"><option value="sub">sub stream</option><option value="main">main stream</option></select>
     <button id="btnSnap">Refresh</button>
     <label class="row muted" style="gap:4px" title="Ticked: a fresh picture every 5 s and one after each move. Unticked: only after a move or Refresh"><input type="checkbox" id="liveSnap" checked> live</label>
+    <label class="row muted" style="gap:4px" title="camera.invert_stream: the camera hangs upside down; the edge (multy.py) turns snapshots, motion and clips by 180°. The camera itself is not changed, so the picture here is turned by the page to show what the edge will record. Saved with Save to camera and edge"><input type="checkbox" id="vInvert"> upside down</label>
     <button id="btnDrawZone" title="Drag on the picture: an area motion detection ignores (exclude_zones; several allowed)">Exclude zone</button>
     <button id="btnDrawRoi" title="Drag on the picture: the only area motion detection watches (roi_crop, turns on use_roi)">ROI</button>
     <button id="btnClearZones" title="Remove all exclude zones">Clear zones</button>
@@ -228,6 +224,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
       <button id="btnReadOsd" title="Read the camera's title, date format and positions">Read OSD</button>
       <button id="btnApplyOsd" class="primary" title="Send title (camera ID), date format, on/off and your positions to the camera">Apply OSD</button>
       <button id="btnOsdOff" title="Switch the camera's OSD off: date, title and its other default texts (where the camera allows it)">OSD off</button>
+      <button id="btnOsdOn" title="Switch the camera's date and title back on (title = camera ID), at the camera's default positions">OSD on</button>
     </div>
   </div>
   <div class="ptzbox" id="ptzCard">
@@ -261,6 +258,18 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
         <span>Zoom <b id="pvZoom">–</b></span><span>Focus <b id="pvFocus">–</b></span>
         <button id="btnPos" title="Read the position now">&#8635;</button>
       </div>
+      <div class="row" style="margin-top:6px" title="Send the camera to a position you type (ONVIF): pan and tilt from -1 to 1, zoom from 0 to 1. Empty zoom = keep the zoom.">
+        <span class="muted">Go to</span>
+        <label class="muted">P <input id="absX" type="number" min="-1" max="1" step="0.05" value="0" style="width:62px"></label>
+        <label class="muted">T <input id="absY" type="number" min="-1" max="1" step="0.05" value="0" style="width:62px"></label>
+        <label class="muted">Z <input id="absZ" type="number" min="0" max="1" step="0.05" placeholder="keep" style="width:62px"></label>
+        <button id="btnAbsGo">Go</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnAbsTest" title="For cameras that report no position or store no presets: does the camera go to an absolute position (pan -0.5, +0.5, -0.5 again) and come back to the same view? About 25 s; the camera moves.">Absolute move test</button>
+        <span class="muted" id="absVerdict"></span>
+      </div>
+      <div id="absPics" style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px"></div>
     </div>
     </div>
   <div class="markers" id="markersBox">
@@ -425,9 +434,11 @@ async function loadList() {
   const d = await api("/api/configs");
   const sel = $("camPick"), items = d.items;           // central's base (older ones still in out/ too)
   sel.innerHTML = `<option value="">${items.length ? "open a camera…" : "no cameras yet"}</option>` +
+    `<option value="new">+ new camera (by IP)</option>` +
     items.map(it => `<option value="${esc(it.where + "|" + it.file)}"${current && current.file === it.file ? " selected" : ""}>${esc(it.id)} · ${esc(it.host || "")}</option>`).join("");
 }
 $("camPick").onchange = () => { const v = $("camPick").value; if (!v) return;
+  if (v === "new") { newCamera(); return; }
   const [where, f] = v.split("|"); openConfig(where, f).catch(e => toast(e.message)); };
 
 async function openConfig(where, file) {
@@ -473,7 +484,7 @@ document.addEventListener("input", (e) => {
 });
 
 // ---- parameters: one panel per category; page 1 / page 2 only where they do not fit together
-const PANEL_NAMES = { camera: "Camera", connection: "Connection", sensor_hardware_properties: "Sensor",
+const PANEL_NAMES = { login: "Login", camera: "Camera", connection: "Connection", sensor_hardware_properties: "Sensor",
   stream_encoder_properties: "Encoder", motion: "Motion", face_quality: "Face", osd: "On-screen display (OSD)" };
 // two pages: 1 = Camera (all panels), 2 = View · PTZ · POI (in the same place)
 let PAGE = 1;
@@ -508,9 +519,10 @@ function liveTimer() {
 $("liveSnap").onchange = liveTimer;
 
 // panels in columns that all end on the same bottom line
-const COLUMNS = [["camera"], ["sensor_hardware_properties", "stream_encoder_properties"], ["motion", "connection"],
+const COLUMNS = [["login", "camera"], ["sensor_hardware_properties", "stream_encoder_properties"], ["motion", "connection"],
                  ["face_quality", "osd", "ptzpoi"]];
 const WIDE = new Set(["camera.ptz_markers", "face_quality.enabled"]);
+const LOGIN_KEYS = ["host", "http_port", "username", "password"];   // Camera panel split: the Login panel
 // OSD panel: the ticks in the left column, each with its fields
 const OSD_ROWS = [["show_date", "date_format", "date_position"], ["show_name", "@name_text", "name_position"],
                   ["use_camera_positions"], ["other_texts_off"],
@@ -553,6 +565,16 @@ function buildForm(json) {
       grid.appendChild(fieldFor(sec, "", obj)); placed.push([sec, fs]); continue;
     }
     if (sec === "osd") buildOsd(grid, obj);
+    else if (sec === "camera") {            // the camera's address and login in their own panel on top
+      const lg = document.createElement("fieldset"); lg.dataset.section = "login"; lg.className = "loginpanel";
+      lg.innerHTML = `<legend>${esc(PANEL_NAMES.login)}</legend>`;
+      const lgrid = document.createElement("div"); lgrid.className = "grid"; lg.appendChild(lgrid);
+      for (const [k, v] of Object.entries(obj)) (LOGIN_KEYS.includes(k) ? lgrid : grid).appendChild(fieldFor(sec, k, v));
+      const idb = document.createElement("div"); idb.className = "field wide idrow";
+      idb.innerHTML = `<button type="button" id="btnIdentify" class="primary" title="Find what the camera is and a working login: without a password the default logins are tried first (at most 3); the password is asked only when none works">Identify</button>`;
+      lgrid.appendChild(idb);
+      placed.push(["login", lg]);
+    }
     else for (const [k, v] of Object.entries(obj)) grid.appendChild(fieldFor(sec, k, v));
     placed.push([sec, fs]);
   }
@@ -573,11 +595,25 @@ function buildForm(json) {
     if (f) f.addEventListener("change", () => { $(id).checked = f.checked; drawOverlay(); });
   }
   ownTicks();
+  wireIdentify();
+  const inv = document.getElementById("f_camera_invert_stream");
+  $("vInvert").checked = !!(inv && inv.checked); showInvert();
+  if (inv) inv.addEventListener("change", () => { $("vInvert").checked = inv.checked; showInvert(); });
   const ucp = document.getElementById("f_osd_use_camera_positions");
   if (ucp) ucp.addEventListener("change", () => { osdPositionsLock(); if (ucp.checked && OSD.read) osdFromCamera(); drawOverlay(); });
   osdPositionsLock();
   showPage(PAGE === 2 ? 2 : 1);
 }
+// invert_stream: the camera is not changed (most cannot turn their picture); multy.py turns what the edge
+// records, so the page turns the picture to show that. Zones / ROI are drawn on the turned picture, as multy.py uses them.
+function showInvert() { $("snap").classList.toggle("inv", $("vInvert").checked); }
+$("vInvert").onchange = () => {
+  const inv = document.getElementById("f_camera_invert_stream");
+  if (inv) inv.checked = $("vInvert").checked;
+  showInvert();
+  sbStep($("vInvert").checked ? "upside down: the edge turns snapshots, motion and clips by 180° (Save to camera and edge to use it)"
+                             : "upside down off (Save to camera and edge to use it)");
+};
 function ptzPoiStatus() {
   const box = document.getElementById("ppStatus"); if (!box) return;
   const cam = camNow() || {}, m = markersNow(), keys = Object.keys(m).sort((a, b) => Number(a) - Number(b));
@@ -758,37 +794,61 @@ $("btnTest").onclick = async () => {
   b.disabled = false; b.textContent = "Run test";
 };
 
-// ---- Add camera by IP (header): default logins first; the login is asked only when none works
-$("btnIdentifyIp").onclick = () => {
-  const ip = $("ipAddr").value.trim();
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) { toast("Fill in the rest of the IP address"); $("ipAddr").focus(); return; }
-  identifyCam(ip);
-};
-$("ipAddr").addEventListener("keydown", e => { if (e.key === "Enter") $("btnIdentifyIp").click(); });
-$("ipAddr").addEventListener("focus", () => { const f = $("ipAddr"); setTimeout(() => f.setSelectionRange(f.value.length, f.value.length), 0); });
-$("ipPass").addEventListener("keydown", e => { if (e.key === "Enter") $("btnIdentifyIp").click(); });
+// ---- Add a camera by IP (Login panel): host + Identify. Without a password the default logins are tried
+// first (default_logins.json, camera_catalog.json); the password is asked only when none works.
+function newCamera() {
+  const json = JSON.parse(JSON.stringify(TEMPLATE || {}));
+  json.camera = { ...(json.camera || {}), host: "192.168.", username: "admin", password: "" };
+  setCurrent({ where: "central", file: "", json, reportText: null });
+  showPage(1);
+  const h = document.getElementById("f_camera_host");
+  if (h) { h.focus(); h.setSelectionRange(h.value.length, h.value.length); }
+  sbStep("new camera: type its IP in the Login panel and press Identify");
+}
+function wireIdentify() {
+  const b = document.getElementById("btnIdentify"); if (!b) return;
+  b.onclick = () => {
+    const ip = (document.getElementById("f_camera_host")?.value || "").trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) { toast("Type the camera's IP address in host"); document.getElementById("f_camera_host")?.focus(); return; }
+    identifyCam(ip);
+  };
+  for (const k of ["host", "username", "password"])
+    document.getElementById(`f_camera_${k}`)?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); b.click(); } });
+}
 
 async function identifyCam(ip) {
-  const btn = $("btnIdentifyIp"); btn.disabled = true; btn.textContent = "Identifying…";
+  const btn = $("btnIdentify"); btn.disabled = true; btn.textContent = "Identifying…";
   sbClear(); sbStep(`identifying ${ip} (up to 30 s)…`);
-  const asked = !$("loginAsk").hidden;
+  const user = document.getElementById("f_camera_username")?.value || "";
+  const pass = document.getElementById("f_camera_password")?.value || "";
+  const keep = { site: document.getElementById("f_camera_site")?.value || "",
+                 name: current && current.file ? (document.getElementById("f_camera_name")?.value || "") : "" };
+  const askLogin = (msg) => {
+    document.querySelector("fieldset.loginpanel")?.classList.add("ask");
+    const pw = document.getElementById("f_camera_password"); if (pw) { pw.focus(); pw.select(); }
+    toast(msg);
+  };
   try {
-    const d = await api("/api/identify", { ip, username: asked ? $("ipUser").value : "", password: asked ? $("ipPass").value : "" });
+    // a typed password is tried first; none typed: the default logins
+    const d = await api("/api/identify", { ip, username: pass ? user : "", password: pass });
     if (d.need_login) {
-      $("loginAsk").hidden = false; $("ipUser").focus();
       sbIssue(`${ip}: ${d.note}`);
-      toast(d.locked ? "Camera login locked: wait, then try again" : "The default logins did not work: enter the camera's login");
+      askLogin(d.locked ? "Camera login locked: wait, then try again" : "The default logins did not work: type the camera's login, then Identify");
     } else {
-      $("loginAsk").hidden = true; $("ipPass").value = "";
       const i = d.identify;
-      setCurrent({ where: "central", file: "", json: d.json, reportText: null });
+      if (keep.site) d.json.camera.site = keep.site;
+      if (keep.name) d.json.camera.name = keep.name;
+      setCurrent({ where: "central", file: current?.file || "", json: d.json, reportText: null });
       sbStep(`${ip}: ${i.maker || "?"} ${i.model || ""} · PTZ ${i.ptz_protocol} · ${i.streams.length} stream(s) · login ${d.login_from}`);
       (i.notes || []).forEach(n => sbIssue(`${ip}: ${n}`));
       showPage(1); document.getElementById("f_camera_site")?.focus();
       toast("Give the site and name, then Run test");
     }
-  } catch (e) { sbIssue(`${ip}: ${e.message}`); }
-  btn.disabled = false; btn.textContent = "Identify";
+  } catch (e) {                         // any failure: the login may be the cause
+    sbIssue(`${ip}: ${e.message}`);
+    askLogin("Identify failed: check the IP and the login, then Identify again");
+  }
+  const b2 = $("btnIdentify"); if (b2) { b2.disabled = false; b2.textContent = "Identify"; }
 }
 
 
@@ -821,6 +881,30 @@ async function ptz(action, extra = {}) {
     return d;
   } catch (e) { sbIssue(`PTZ ${action}: ${e.message}`); }
 }
+
+$("btnAbsGo").onclick = async () => {
+  const x = Number($("absX").value), y = Number($("absY").value), zs = $("absZ").value.trim();
+  if (!(x >= -1 && x <= 1 && y >= -1 && y <= 1) || (zs !== "" && !(Number(zs) >= 0 && Number(zs) <= 1))) {
+    sbIssue("Go to: pan and tilt from -1 to 1, zoom from 0 to 1"); return; }
+  const d = await ptz("absolute", { pos: { x, y, z: zs === "" ? null : Number(zs) } });
+  if (d && d.ok) { sbStep(`PTZ go to pan ${x} tilt ${y}${zs === "" ? "" : " zoom " + zs}: sent`); setTimeout(() => ptz("status"), 3000); }
+};
+["absX", "absY", "absZ"].forEach(id => $(id).addEventListener("keydown", e => { if (e.key === "Enter") $("btnAbsGo").click(); }));
+
+$("btnAbsTest").onclick = async () => {
+  if (!current) return;
+  const b = $("btnAbsTest"); b.disabled = true; b.textContent = "Testing… (about 25 s)";
+  $("absVerdict").textContent = ""; $("absPics").innerHTML = "";
+  sbStep("absolute move test: the camera moves to pan -0.5, +0.5, -0.5…");
+  try {
+    const d = await api("/api/ptz/absmove_test", { camera: camNow() });
+    d.steps.forEach(s => sbStep(`absolute move test: ${s}`));
+    (d.ok ? sbStep : sbIssue)(`absolute move test: ${d.verdict}`);
+    $("absVerdict").textContent = d.verdict.split(":")[0];
+    $("absPics").innerHTML = d.pictures.map(p => `<figure style="margin:0;text-align:center"><img src="${p.jpg}" style="width:120px;border-radius:4px;display:block"><figcaption class="muted" style="font-size:11px">${p.label}</figcaption></figure>`).join("");
+  } catch (e) { sbIssue(`absolute move test: ${e.message}`); }
+  b.disabled = false; b.textContent = "Absolute move test";
+};
 
 let moving = null;
 function startMove(dir, btn) {
@@ -983,6 +1067,8 @@ function hookCanvas(cv) {
       if (document.getElementById("f_osd_own_overlay")?.checked) {   // our own text
         const f = document.getElementById(`f_osd_overlay_${drawMode}_position`); if (f) f.value = at;
         sbStep(`own OSD text: ${what} placed at ${at}`);
+      } else if ($("vInvert").checked) {                            // the camera draws its OSD on the unturned picture
+        sbIssue("camera OSD: untick upside down to place the camera's date / title (the camera draws them on its own, unturned picture)");
       } else {                                                       // the camera's OSD: sent by Apply OSD
         const u = document.getElementById("f_osd_use_camera_positions"); if (u) u.checked = false; osdPositionsLock();
         const f = document.getElementById(`f_osd_${drawMode}_position`); if (f) f.value = at;
@@ -1068,6 +1154,12 @@ $("btnOsdOff").onclick = () => {        // date, title and the camera's other te
   }
   drawOverlay(); osdCall("apply");
 };
+$("btnOsdOn").onclick = () => {         // date and title back on, sent at once
+  for (const [k, v] of [["show_date", true], ["show_name", true], ["other_texts_off", false]]) {
+    const f = document.getElementById(`f_osd_${k}`); if (f) f.checked = v;
+  }
+  drawOverlay(); osdCall("apply");
+};
 $("btnApplyOsd").onclick = () => osdCall("apply");
 
 $("btnDrawZone").onclick = () => { if (!document.querySelector(".snap canvas")) return toast("Load a picture first"); setDrawMode(drawMode === "zone" ? null : "zone"); };
@@ -1078,8 +1170,8 @@ window.addEventListener("resize", drawOverlay);
 $("btnSnap").onclick = refreshSnap;
 $("snapWhich").onchange = refreshSnap;
 
-api("/api/template").then(d => { TEMPLATE = d.json; SITES = d.sites || []; }).catch(() => {}).finally(() => loadList().catch(e => toast(e.message)));
-setTimeout(() => $("ipAddr").focus(), 300);   // ready to type the rest of the address
+api("/api/template").then(d => { TEMPLATE = d.json; SITES = d.sites || []; }).catch(() => {})
+  .finally(() => { loadList().catch(e => toast(e.message)); if (!current) newCamera(); });   // ready to type an IP
 </script>
 </body>
 </html>

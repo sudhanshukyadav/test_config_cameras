@@ -1,0 +1,75 @@
+{
+  "_about": "Known camera makers / models: factory logins, how PTZ is driven and whether the PTZ position can be read. The camera tool (discover.py) tries the logins of the matching entry first (at most max_login_tries in all, cameras lock after a few wrong passwords), then the others. Add a new model here when it arrives. Your plant's own passwords go into default_logins.json (not in git). Matching: maker_match / model_match are parts of the maker / model text the camera reports over ONVIF (lower case).",
+  "max_login_tries": 3,
+  "entries": [
+    {
+      "name": "YM800S5 PTZ (generic, 5x zoom)",
+      "maker_match": [],
+      "model_match": ["ym800s5"],
+      "logins": [["admin", "123456"]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": false,
+      "note": "Shows P/T/Z on its OSD but reports 0,0,0 over ONVIF GetStatus: position not readable (events get P00T00Z00)."
+    },
+    {
+      "name": "Dahua (and OEM: Amcrest, Lorex, 'General')",
+      "maker_match": ["dahua", "general", "amcrest", "lorex"],
+      "model_match": [],
+      "logins": [["admin", "admin"]],
+      "ptz_protocol": "dahua_cgi",
+      "ptz_position": true,
+      "rtsp_main": "/cam/realmonitor?channel=1&subtype=0",
+      "rtsp_sub": "/cam/realmonitor?channel=1&subtype=1",
+      "note": "Newer firmware has no factory password (set at first start)."
+    },
+    {
+      "name": "Hikvision (and OEM: HiLook, Annke)",
+      "maker_match": ["hikvision", "hilook", "annke"],
+      "model_match": [],
+      "logins": [["admin", "12345"]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": true,
+      "rtsp_main": "/Streaming/Channels/101",
+      "rtsp_sub": "/Streaming/Channels/102",
+      "note": "Firmware since 2016 must be activated with a new password first."
+    },
+    {
+      "name": "Uniview",
+      "maker_match": ["uniview", "unv"],
+      "model_match": [],
+      "logins": [["admin", "123456"]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": true,
+      "rtsp_main": "/media/video1",
+      "rtsp_sub": "/media/video2"
+    },
+    {
+      "name": "Xiongmai / XMEye (H264DVR)",
+      "maker_match": ["xiongmai", "h264dvr", "xm"],
+      "model_match": [],
+      "logins": [["admin", ""]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": false,
+      "note": "Most report no PTZ position."
+    },
+    {
+      "name": "Reolink",
+      "maker_match": ["reolink"],
+      "model_match": [],
+      "logins": [["admin", ""]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": true,
+      "rtsp_main": "/h264Preview_01_main",
+      "rtsp_sub": "/h264Preview_01_sub"
+    },
+    {
+      "name": "NVT / APCam (e.g. JA-A1A)",
+      "maker_match": ["nvt", "apcam"],
+      "model_match": ["ja-a1a"],
+      "logins": [["admin", ""]],
+      "ptz_protocol": "onvif_soap",
+      "ptz_position": false,
+      "note": "ONVIF answers without a login; the login is checked on the video. Moves but reports no position."
+    }
+  ]
+}

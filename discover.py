@@ -14,6 +14,8 @@ How a camera is found and identified:
 Logins: the one you give (plus no login). Given none, the usual factory logins are tried first,
 at most 3 per camera, one cheap check each (ONVIF, else Dahua CGI), stopping at the first that works
 or when the camera reports a lock; then you are asked (find_login, default_logins.json).
+camera_catalog.json lists known makers / models: their factory logins (tried first when the camera
+tells its maker / model without a login), how PTZ is driven and whether its position can be read.
 After this, run the camera test (test_protocol.py --test, or Run test on the page) to measure
 the streams and fill in the encoder values.
 """
@@ -246,8 +248,47 @@ DEFAULT_LOGINS = [("admin", "admin123"), ("admin", ""), ("admin", "admin"), ("ad
 MAX_LOGIN_TRIES = 3     # many cameras lock the login after ~5 wrong passwords (Dahua: 30 min)
 
 
-def default_logins() -> tuple[list, int]:
+def load_catalog() -> dict:
+    """camera_catalog.json next to this file: {max_login_tries, entries: [...]} (empty if missing)."""
+    path = os.path.join(tp.SCRIPT_DIR, "camera_catalog.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cat = json.load(f)
+        return cat if isinstance(cat, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        tp.log("catalog", f"camera_catalog.json unreadable ({e}); not used")
+        return {}
+
+
+def _matches(words, text: str) -> bool:
+    text = (text or "").lower()
+    return any(w and re.search(rf"(?<![a-z0-9]){re.escape(str(w).lower())}(?![a-z0-9])", text) for w in (words or []))
+
+
+def catalog_entry(maker: str | None, model: str | None) -> dict | None:
+    """The catalog entry for this maker / model text (model first: it is the more precise), or None."""
+    entries = load_catalog().get("entries") or []
+    for e in entries:
+        if model and _matches(e.get("model_match"), model):
+            return e
+    for e in entries:
+        if maker and _matches(e.get("maker_match"), maker):
+            return e
+    return None
+
+
+def default_logins(maker: str | None = None, model: str | None = None) -> tuple[list, int]:
+    """Logins to try, in order: default_logins.json (the plant's own), the matching catalog entry, the built-in
+    list, the other catalog entries. Tries: default_logins.json max_tries, else the catalog's, else 3."""
     logins, tries = [], MAX_LOGIN_TRIES
+    cat = load_catalog()
+    if cat.get("max_login_tries"):
+        tries = int(cat["max_login_tries"])
+    entry = catalog_entry(maker, model)
+    first = [tuple(map(str, x)) for x in (entry or {}).get("logins", []) if x]
+    others = [tuple(map(str, x)) for e in (cat.get("entries") or []) if e is not entry for x in e.get("logins", []) if x]
     path = os.path.join(tp.SCRIPT_DIR, "default_logins.json")
     if os.path.isfile(path):
         try:
@@ -257,8 +298,24 @@ def default_logins() -> tuple[list, int]:
             tries = int(cfg.get("max_tries", tries))
         except (OSError, ValueError, TypeError, IndexError) as e:
             tp.log("login", f"default_logins.json unreadable ({e}); using the built-in list")
-    out = list(dict.fromkeys(logins + DEFAULT_LOGINS))
+    out = list(dict.fromkeys(logins + first + DEFAULT_LOGINS + others))
+    out = [(u, p if p is not None else "") for u, p in out]
     return out, max(1, min(tries, len(out)))
+
+
+def _onvif_device_info(ip: str, port: int) -> tuple[str | None, str | None]:
+    """(maker, model) when the camera tells them without a login (many do), else (None, None)."""
+    body = ('<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Body><tds:GetDeviceInformation/></s:Body></s:Envelope>')
+    try:
+        r = requests.post(f"http://{ip}:{port}/onvif/device_service", data=body.encode(),
+                          headers={"Content-Type": "application/soap+xml; charset=utf-8"}, timeout=4)
+    except requests.RequestException:
+        return None, None
+    if r.status_code != 200:
+        return None, None
+    get = lambda tag: (re.search(rf"<[\w]*:?{tag}>([^<]*)<", r.text) or [None, None])[1]  # noqa: E731
+    return get("Manufacturer"), get("Model")
 
 
 def _onvif_login(ip: str, port: int, user: str, password: str) -> str:
@@ -361,7 +418,11 @@ def find_login(ip: str, ports=None, onvif_xaddrs=None, first=None) -> dict:
     if check is None:
         res["note"] = "the camera answers neither ONVIF nor Dahua CGI: give its login"
         return res
-    logins, tries = default_logins()
+    maker, model = _onvif_device_info(ip, oport) if oport else (None, None)
+    entry = catalog_entry(maker, model)
+    if entry:
+        tp.log(ip, f"catalog: {entry.get('name')} ({maker or '?'} {model or ''}); its logins first")
+    logins, tries = default_logins(maker, model)
     if first:
         logins = list(dict.fromkeys([tuple(first)] + logins))
     i = 0
@@ -449,6 +510,14 @@ def identify(ip: str, user: str = "", password: str = "", ports=None, onvif_xadd
         else:
             res["notes"].append(f"ONVIF login failed ({drv.last_error}); give the camera's login")
 
+    # --- camera catalog (camera_catalog.json): what is known about this maker / model
+    entry = catalog_entry(res["maker"], res["model"])
+    if entry:
+        res["catalog"] = entry.get("name")
+        res["notes"].append(f"catalog: {entry.get('name')}" + (f" - {entry['note']}" if entry.get("note") else ""))
+        if entry.get("ptz_position") is False:
+            res["ptz_position"] = False
+
     # --- Dahua CGI (Dahua OEM cameras often report maker "General")
     http_port = 80 if 80 in ports or not ports else (oport or 80)
     dtype = _dahua_cgi(ip, http_port, user, password)
@@ -462,7 +531,10 @@ def identify(ip: str, user: str = "", password: str = "", ports=None, onvif_xadd
 
     # --- No ONVIF streams: try known RTSP paths (stops at the first maker pattern that works)
     if not res["streams"] and (554 in ports or not ports):
-        for vendor, main_path, sub_path in VENDOR_RTSP_PATHS:
+        paths = list(VENDOR_RTSP_PATHS)
+        if entry and entry.get("rtsp_main"):                       # the catalog's paths for this model first
+            paths.insert(0, ("catalog", entry["rtsp_main"], entry.get("rtsp_sub")))
+        for vendor, main_path, sub_path in paths:
             info, used = _rtsp_ok(ip, 554, main_path, user, password)
             if not info:
                 continue
@@ -508,6 +580,8 @@ def to_camera_json(ident: dict, user: str = "", password: str = "") -> dict:
     cam.update({"name": ident["name"], "vendor": "dahua" if ident["vendor"] == "dahua" else "generic",
                 "ptz_protocol": ident["ptz_protocol"], "host": ident["ip"], "port": ident["rtsp_port"],
                 "http_port": ident["http_port"], "username": user, "password": password})
+    if ident.get("ptz_position") is False:        # camera_catalog.json: this model does not report its position
+        cam["ptz_position"] = False
     dahua = re.compile(r"/cam/realmonitor\?channel=(\d+)&subtype=(\d+)")
     if main and dahua.search(main["path"]) and dahua.search(sub["path"]):
         mm, sm = dahua.search(main["path"]), dahua.search(sub["path"])

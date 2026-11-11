@@ -180,3 +180,18 @@ Run from the folder holding the camera JSONs (e.g. `C:\Users\sudha\edge_worker`)
 ```
 python C:\Users\sudha\camtest\test_protocol.py gate --test
 ```
+
+## Camera catalog and logins (2026-11-11)
+
+- `camera_catalog.json` (in git): known makers / models with their factory logins, PTZ protocol, whether the
+  PTZ position can be read (`ptz_position`), RTSP paths and a note. Identify asks the camera its maker /
+  model without a login (ONVIF GetDeviceInformation, many allow it) and tries that entry's logins first.
+  Add each new model here when it arrives.
+- `default_logins.json` (not in git): the plant's own logins, tried before everything else.
+- Order: default_logins.json, the matching catalog entry, the built-in list, the other catalog entries; at
+  most `max_login_tries` (3) in all (cameras lock after a few wrong passwords).
+- **The login box is shown whenever identify cannot work**: no default login worked, the camera answers neither
+  ONVIF nor Dahua CGI and no login was typed, the login is accepted but no video stream opens or ONVIF refuses
+  it, or identify fails for any other reason.
+- A model with `ptz_position: false` (e.g. YM800S5: shows P/T/Z on its OSD, reports 0,0,0 over ONVIF) gets
+  `camera.ptz_position: false` in its JSON and a note; its events are named P00T00Z00.

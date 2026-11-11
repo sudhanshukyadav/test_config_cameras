@@ -334,7 +334,20 @@ def get_driver(cam):
 _status_logged = set()     # cameras whose position reply was already written to the log
 
 
-def ptz(cam, action, speed=None, preset=None, token=None):
+ABS_ZOOM_SPACE = "http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"
+
+
+def absolute_move(drv, x, y, z=None) -> bool:
+    """ONVIF AbsoluteMove: pan x and tilt y from -1 to 1, zoom z from 0 to 1 (generic spaces); z None = keep."""
+    x, y = max(-1.0, min(1.0, float(x))), max(-1.0, min(1.0, float(y)))
+    zoom = "" if z is None else f'<tt:Zoom x="{max(0.0, min(1.0, float(z)))}" space="{ABS_ZOOM_SPACE}"/>'
+    body = (f"<tptz:AbsoluteMove><tptz:ProfileToken>{drv.profile_token}</tptz:ProfileToken><tptz:Position>"
+            f'<tt:PanTilt x="{x}" y="{y}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>'
+            f"{zoom}</tptz:Position></tptz:AbsoluteMove>")
+    return drv._post_soap(body, timeout=4) is not None
+
+
+def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
     drv = get_driver(cam)
     name = drv.display_name
     if speed is not None:
@@ -370,6 +383,13 @@ def ptz(cam, action, speed=None, preset=None, token=None):
                 tp.log(name, f"ptz set_preset: the camera keeps this point as its preset {drv.last_preset_token}")
         else:
             ok = drv.set_preset(int(preset))
+    elif action == "absolute":                       # go to typed pan / tilt / zoom (ONVIF generic spaces)
+        if not isinstance(drv, tp.ONVIFSoapDriver):
+            raise ValueError("go to a typed position works on ONVIF PTZ cameras only (this one uses Dahua CGI)")
+        pos = pos or {}
+        z = pos.get("z")
+        ok = absolute_move(drv, pos.get("x", 0), pos.get("y", 0), None if z in (None, "") else z)
+        extra["target"] = {"x": pos.get("x"), "y": pos.get("y"), "z": z}
     elif action == "autofocus":
         ok = drv.trigger_autofocus()
     elif action == "lens_init":
@@ -388,6 +408,66 @@ def ptz(cam, action, speed=None, preset=None, token=None):
     err = getattr(drv, "last_error", None)
     tp.log(name, f"ptz {action} {'OK' if ok else 'FAIL'}" + (f" {err}" if (err and not ok) else ""))
     return {"ok": ok, "error": None if ok else err, **extra}
+
+
+ABS_SPACE = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"
+
+
+def absmove_test(cam):
+    """Does the camera obey ONVIF AbsoluteMove even if it reports no position? Pictures before / after moves to
+    pan -0.5, +0.5 and -0.5 again (tilt 0, zoom unchanged) tell: it moved, and it came back to the same view.
+    If so, our software can keep the POI positions itself and send the camera there (no camera presets needed)."""
+    import base64
+
+    import cv2
+    import numpy as np
+    drv = get_driver(cam)
+    name = drv.display_name
+    if not isinstance(drv, tp.ONVIFSoapDriver):
+        return {"ok": False, "verdict": "only for ONVIF PTZ cameras", "steps": [], "pictures": []}
+    steps, pics = [], []
+    nodes = drv._post_soap("<tptz:GetNodes/>")
+    space = bool(nodes is not None and "AbsolutePanTiltPositionSpace" in nodes.text)
+    steps.append(f"camera lists absolute pan / tilt positions: {'yes' if space else 'no'}")
+
+    def picture(label):
+        data = snapshot(cam, "sub")
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE)
+        small = cv2.resize(img, (320, int(img.shape[0] * 320 / img.shape[1])))
+        ok, jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        pics.append({"label": label, "jpg": "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()})
+        return cv2.GaussianBlur(small, (5, 5), 0).astype(np.float32)
+
+    def move(x):
+        ok = absolute_move(drv, x, 0)
+        steps.append(f"absolute move to pan {x:+.1f}: " + ("accepted" if ok else f"refused ({drv.last_error})"))
+        time.sleep(5)                                    # time to get there
+        return ok
+
+    diff = lambda a, b: float(np.mean(np.abs(a - b)))   # noqa: E731  mean grey-level change, 0..255
+    p0 = picture("before")
+    a1 = move(-0.5)
+    p1 = picture("pan -0.5")
+    a2 = move(0.5)
+    p2 = picture("pan +0.5")
+    a3 = move(-0.5)
+    p3 = picture("pan -0.5 again")
+    moved = max(diff(p0, p1), diff(p1, p2)) > 12
+    back = diff(p1, p3) < 6
+    steps.append(f"picture change: before -> -0.5: {diff(p0, p1):.0f}, -0.5 -> +0.5: {diff(p1, p2):.0f}, "
+                 f"-0.5 again vs first -0.5: {diff(p1, p3):.0f} (0 = same view)")
+    if not (a1 or a2 or a3):
+        verdict = "NO: the camera refuses absolute moves"
+    elif not moved:
+        verdict = "NO: the camera accepts absolute moves but does not move"
+    elif back:
+        verdict = "YES: the camera goes to absolute positions and returns to the same view; POIs can be kept by our software"
+    else:
+        verdict = "PARTLY: the camera moves, but does not return to the same view; POIs would not be reliable"
+    for st in steps:
+        tp.log(name, f"absolute move test: {st}")
+    tp.log(name, f"absolute move test: {verdict}")
+    return {"ok": verdict.startswith("YES"), "verdict": verdict, "steps": steps, "pictures": pics}
 
 
 def snapshot(cam, which, encoder=None):
@@ -471,6 +551,9 @@ def identify_ip(b):
             user, password = known["login"]
     found = dc.find_login(ip, ports, xaddrs, first=(user, password) if (user or password) else None)
     if found["how"] is None:
+        if not (user or password):      # neither ONVIF nor Dahua CGI and no login typed: ask for it
+            return {"need_login": True, "locked": False, "tried": 0,
+                    "note": found["note"] or "the camera's login could not be checked: give its login"}
         login_from = "yours"            # neither ONVIF nor Dahua CGI: identify tries the given login on RTSP
     elif found["login"] is None:
         return {"need_login": True, "locked": found["locked"], "note": found["note"], "tried": found["tried"]}
@@ -478,6 +561,12 @@ def identify_ip(b):
         login_from = (f"from {known['file']}" if known else "yours") if found["login"] == (user, password) else "default"
         user, password = found["login"]
     ident = dc.identify(ip, user, password, ports, xaddrs, None)
+    # the login was accepted but nothing works with it (no stream, ONVIF refuses it): ask for the login again
+    # instead of making a camera JSON that cannot show a picture
+    if not ident.get("streams") or ident.get("onvif_login") == "failed":
+        why = "ONVIF refused the login" if ident.get("onvif_login") == "failed" else "no video stream opened with that login"
+        return {"need_login": True, "locked": False, "tried": found.get("tried", 0),
+                "note": f"{why}: give the camera's login" + (f" ({'; '.join(ident.get('notes') or [])})" if ident.get("notes") else "")}
     if found.get("how") == "rtsp":
         ident.setdefault("notes", []).append("ONVIF on this camera takes no login; the login was checked on the video")
     return {"identify": ident, "login_from": login_from, "login_user": user,
@@ -548,8 +637,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, same_ip(b["json"]))
             if u.path == "/api/save_all":
                 return self._send(200, save_all(b["json"]))
+            if u.path == "/api/ptz/absmove_test":
+                return self._send(200, absmove_test(b["camera"]))
             if u.path == "/api/ptz":
-                return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset"), b.get("token")))
+                return self._send(200, ptz(b["camera"], b["action"], b.get("speed"), b.get("preset"), b.get("token"),
+                                           b.get("pos")))
             if u.path == "/api/discover":
                 devices = dc.discover(b.get("subnet") or None, scan=b.get("scan", True))
                 known = {i["host"]: i for i in list_configs()}
