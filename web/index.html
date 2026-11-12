@@ -362,6 +362,7 @@ const HINTS = {
   "motion.max_lighting_ratio": "ignore when more than this share of the frame changes (lights, IR switch), 0–1",
   "motion.initial_snap_delay_sec": "wait this long after motion starts before the first snapshot",
   "motion.post_roll_buffer_sec": "keep recording this long after motion stops",
+  "stream_limit": "* the plant's stream limit, written here on Save (pull.json settings.stream_limit); the edge checks the camera against it",
   "motion.pre_roll_sec": "seconds recorded BEFORE motion starts (held in the edge's RAM). Entry / exit cameras: 3. 0 = off: the main stream is opened only on motion, so the clip starts 1–4 s late",
   "motion.cooldown_period_sec": "after an event, ignore new motion for this long",
   "motion.draw_motion_box": "draw a box around the motion on snapshots",
@@ -1221,7 +1222,14 @@ window.addEventListener("resize", drawOverlay);
 $("btnSnap").onclick = refreshSnap;
 $("snapWhich").onchange = refreshSnap;
 
-api("/api/template").then(d => { TEMPLATE = d.json; SITES = d.sites || []; }).catch(() => {})
+api("/api/template").then(d => {
+  TEMPLATE = d.json; SITES = d.sites || [];
+  const L = d.stream_limit;                    // the plant's limit for the main stream (pull.json settings.stream_limit)
+  SECTION_HINTS.stream_encoder_properties = L
+    ? `Plant stream limit: main stream at most ${L.max_width}x${L.max_height}, ${L.max_fps} fps, ${L.max_kbps} kbps. ` +
+      `Save to camera and edge caps higher values and writes them into the camera; the edge reports a camera that sends more.`
+    : "No stream limit (pull.json settings.stream_limit is off).";
+}).catch(() => {})
   .finally(() => { loadList().catch(e => toast(e.message)); if (!current) newCamera(); });   // ready to type an IP
 </script>
 </body>

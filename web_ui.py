@@ -37,6 +37,78 @@ _snap_locks = {}                   # camera host -> Lock (one picture stream per
 
 
 # ---- where the camera JSONs live: central's base (made here) and the site's edge base ----------
+STREAM_LIMIT_DEFAULT = {"max_width": 1920, "max_height": 1080, "max_fps": 15, "max_kbps": 2048}
+STD_RES = [(3840, 2160), (2560, 1440), (2304, 1296), (1920, 1080), (1600, 900), (1280, 720), (1024, 576), (960, 540),
+           (2592, 1944), (2048, 1536), (1600, 1200), (1280, 960), (1024, 768), (800, 600), (704, 576), (640, 480)]
+
+
+def stream_limit(pc: dict | None = None) -> dict | None:
+    """The plant's limit for every camera's MAIN stream (pull.json settings.stream_limit; defaults
+    1920x1080, 15 fps, 2048 kbps). "off" / false = no limit (high-bandwidth network released)."""
+    raw = ((pc if pc is not None else pull_config()).get("settings") or {}).get("stream_limit", {})
+    if raw in (False, "off", "none", None):
+        return None
+    lim = dict(STREAM_LIMIT_DEFAULT)
+    if isinstance(raw, dict):
+        for k in lim:
+            try:
+                if raw.get(k):
+                    lim[k] = int(raw[k])
+            except (TypeError, ValueError):
+                pass
+    return lim
+
+
+def _fit_resolution(w: int, h: int, lim: dict) -> tuple[int, int]:
+    """The biggest usual resolution of the same shape within the limit (cameras only take their own list)."""
+    ok = [(a, b) for a, b in STD_RES if a <= lim["max_width"] and b <= lim["max_height"] and abs(a / b - w / h) < 0.06]
+    if ok:
+        return max(ok, key=lambda r: r[0] * r[1])
+    f = min(lim["max_width"] / w, lim["max_height"] / h)
+    return int(w * f) // 16 * 16, int(h * f) // 16 * 16
+
+
+def apply_stream_limit(data: dict, lim: dict | None) -> list[str]:
+    """Caps the main stream in the camera JSON to the limit (written into the camera by Save); returns what
+    was changed. The limit itself goes into the JSON (stream_limit) so the edge can check the camera."""
+    if not lim:
+        data.pop("stream_limit", None)
+        return []
+    enc = data.setdefault("stream_encoder_properties", {})
+    notes = []
+    res = enc.get("main_stream_resolution")
+    try:
+        w, h = int(res[0]), int(res[1])
+    except (TypeError, ValueError, IndexError):
+        w = h = 0
+    if w and h and (w > lim["max_width"] or h > lim["max_height"]):
+        nw, nh = _fit_resolution(w, h, lim)
+        enc["main_stream_resolution"] = [nw, nh]
+        notes.append(f"main resolution {w}x{h} -> {nw}x{nh}")
+    try:
+        fps = float(enc.get("fps") or 0)
+    except (TypeError, ValueError):
+        fps = 0
+    if fps > lim["max_fps"]:
+        enc["fps"] = lim["max_fps"]
+        notes.append(f"fps {fps:g} -> {lim['max_fps']}")
+        try:
+            if int(enc.get("gop_keyframe_interval") or 0) > lim["max_fps"]:
+                enc["gop_keyframe_interval"] = lim["max_fps"]          # a keyframe every second
+                notes.append(f"GOP -> {lim['max_fps']} (1 s)")
+        except (TypeError, ValueError):
+            pass
+    try:
+        kb = int(enc.get("bitrate_kbps") or 0)
+    except (TypeError, ValueError):
+        kb = 0
+    if not kb or kb > lim["max_kbps"]:
+        enc["bitrate_kbps"] = lim["max_kbps"]
+        notes.append(f"bitrate {kb or '?'} -> {lim['max_kbps']} kbps")
+    data["stream_limit"] = dict(lim)
+    return notes
+
+
 def pull_config() -> dict:
     """The AiSys central pull.json (next to this repo, or in AISYS_CONFIG_DIR)."""
     for p in (os.path.join(os.environ.get("AISYS_CONFIG_DIR", ""), "pull.json"),
@@ -287,6 +359,11 @@ def save_all(data) -> dict:
         cam_d.setdefault("flip_stream", bool(cam_d.get("invert_stream")))
         cam_d.pop("invert_stream", None)
     data["storage"] = {"central_base": (pc.get("central_storage") or {}).get("mount_path"), "edge_base": edge_raw}
+    lim = stream_limit(pc)
+    capped = apply_stream_limit(data, lim)
+    if capped:
+        steps.append({"ok": True, "step": f"stream limit ({lim['max_width']}x{lim['max_height']}, {lim['max_fps']} fps, "
+                                          f"{lim['max_kbps']} kbps): " + "; ".join(capped)})
     for where, folder in (("central", chk["central"]), ("edge", chk["edge"])):
         if not folder:
             steps.append({"ok": False, "step": f"no edge base known for site {(data.get('camera') or {}).get('site') or '?'} (pull.json)"})
@@ -684,7 +761,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, progress(int(q.get("since", 0))))
             if u.path == "/api/template":       # with the sites of central's pull.json (the site list)
                 sites = [str(n.get("site_name")) for n in pull_config().get("edge_nodes", []) if n.get("site_name")]
-                return self._send(200, {"json": tp.JSON_TEMPLATE, "sites": list(dict.fromkeys(sites))})
+                return self._send(200, {"json": tp.JSON_TEMPLATE, "sites": list(dict.fromkeys(sites)),
+                                        "stream_limit": stream_limit()})
             return self._send(404, {"error": "not found"})
         except Exception as e:
             return self._send(400, {"error": f"{type(e).__name__}: {e}"})
