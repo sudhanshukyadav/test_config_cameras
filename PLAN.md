@@ -209,6 +209,12 @@ python C:\Users\sudha\camtest\test_protocol.py gate --test
   object is above `keep_alive_ratio` (default 0.25) of it, so a person walking away and coming back is one
   event. `post_roll_buffer_sec` ends it, then `cooldown_period_sec` blocks new events: keep the cooldown
   short (a few seconds), set per camera.
+- **Pre-roll (2026-11-12):** `motion.pre_roll_sec` (template default 0, help text on the page): seconds
+  recorded before the trigger, held in the edge's RAM. Entry / exit cameras (main gate etc.) get 3; the
+  others 0, which opens the main stream only on motion (clip starts 1-4 s late, at its first keyframe).
+  New fields show on the page after `AISYS-CamSetup` is restarted.
+- **Backlog (2026-11-12, high priority):** PTZ control, PTZ position reporting and setting / storing
+  presets for every PTZ camera from this tool; only the Dahua responds today.
 - **Backlog:** lock events (no motion detection on the edge) for a camera without a PTZ position reading
   while its configuration file is open in the tool, until the editing is finished (moving it, or switching
   its OSD, made false events on FLP Gallery).
