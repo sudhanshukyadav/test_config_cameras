@@ -37,6 +37,7 @@ Defaults = what the tool writes into a new JSON.
 | `password` | `""` | camera login |
 | `flip_stream` | `false` | flip (done by the edge): only if the camera cannot flip its picture itself. Use sparingly; never together with the camera's own Flip |
 | `ptz_markers` | `{}` | points of interest: number, name and PTZ position (set them on the view page) |
+| `ptz_home` | POI 01 if there is one, else 0 | home POI: after a power / cable failure the edge sends the camera back there (0 = none; house button on the view page) |
 | `main_stream_path` | - | RTSP path of the recorded stream, e.g. /live/ch0 |
 | `sub_stream_path` | - | RTSP path used for motion detection |
 | `main_rtsp_url` | - | full RTSP URL; overrides the path |
@@ -51,6 +52,8 @@ Defaults = what the tool writes into a new JSON.
 |---|---|---|
 | `rtsp_transport` | `"tcp"` | tcp is reliable; udp can lose packets |
 | `buffer_size` | `1` | *(not read by the edge)* |
+| `reconnect_max_sec` | `60` | longest wait between two attempts to open the stream after it was lost |
+| `probe_sec` | `10` | while the camera is down, its RTSP port is checked this often; the moment it answers again (power / cable back) the stream is opened at once |
 
 ## sensor_hardware_properties: picture settings written into the camera
 

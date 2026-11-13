@@ -78,6 +78,7 @@ button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.sel { outline: 2px solid var(--accent); }
 button.camflip.on { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+#btnTime.bad { background: #b62324; color: #fff; border-color: #b62324; }
 button:disabled { opacity: .5; cursor: default; }
 input, select, textarea { background: var(--input); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; width: 100%; min-width: 0; }
 input[type=checkbox] { width: auto; }
@@ -212,6 +213,7 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
     <button id="btnSnap">Refresh</button>
     <label class="row muted" style="gap:4px" title="Ticked: a fresh picture every 5 s and one after each move. Unticked: only after a move or Refresh"><input type="checkbox" id="liveSnap" checked> live</label>
     <button id="btnFlipV" class="camflip" title="Flip vertical (top-bottom): written directly into the CAMERA, at once (no Save). Blue = on. Not related to flip_stream on page 1.">Flip V</button><button id="btnFlipH" class="camflip" title="Flip horizontal (left-right): written directly into the CAMERA, at once (no Save). Blue = on. Not related to flip_stream on page 1.">Flip H</button>
+    <button id="btnTime" title="The camera's clock. Click: set it to central's time now and tick automatic sync (NTP) with the time server in pull.json settings.camera_time. Red = off from central.">Sync time</button>
     <button id="btnDrawZone" title="Drag on the picture: an area motion detection ignores (exclude_zones; several allowed)">Exclude zone</button>
     <button id="btnDrawRoi" title="Drag on the picture: the only area motion detection watches (roi_crop, turns on use_roi)">ROI</button>
     <button id="btnClearZones" title="Remove all exclude zones">Clear zones</button>
@@ -344,6 +346,7 @@ const HINTS = {
   "osd.date_format": "date / time format on the picture; default dd-MM-yyyy HH:mm:ss (some cameras only take their own formats)",
   "camera.name": "camera name in logs and folders",
   "camera.site": "site (location) of the camera, e.g. HUB: camera ID = site_camera",
+  "camera.index": "camera number on its site (1, 2, 3 ...; unique per site): its Modbus registers are 40000 + index x 100 (index 1: 40101 = preset 1 ... 40199 = preset 99). 0 = no Modbus registers",
   "camera.vendor": "dahua = Dahua RTSP/CGI paths; generic = stream paths below",
   "camera.ptz_protocol": "dahua_cgi, onvif_soap or none",
   "camera.host": "camera IP address",
@@ -357,6 +360,7 @@ const HINTS = {
   "camera.main_rtsp_url": "full RTSP URL; overrides the path", "camera.sub_rtsp_url": "full RTSP URL; overrides the path",
   "camera.flip_stream": "flip (done by the edge): only if the camera cannot flip its picture itself. Use sparingly; never together with the camera's own Flip",
   "camera.ptz_markers": "points of interest: number, name and PTZ position (set them on the view page)",
+  "camera.ptz_home": "home POI: after a power / cable failure the edge sends the camera back there (0 = none; set with the house button on the view page)",
   "connection.rtsp_transport": "tcp is reliable; udp can lose packets",
   "connection.buffer_size": "*",
   "stream_encoder_properties.fps": "frames per second the camera sends (Run test measures it)",
@@ -489,7 +493,7 @@ function setCurrent(c) {
   loadList();
   EDGE.key = ""; edgeCheck();
   lockHold();
-  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); }
+  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); camTime("read"); }
 }
 
 // ---- camera ID = site_camera: the OSD title and the file name (site_camera.json)
@@ -525,7 +529,7 @@ function showPage(n) {
   if (n === 2) {
     fitPicture(); setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
     refreshSnap();
-    if (!OSD.read && camNow()?.host) { osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); } else osdSummary();
+    if (!OSD.read && camNow()?.host) { osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); camTime("read"); } else osdSummary();
     if ((camNow() || {}).ptz_protocol !== "none") ptz("status");
   } else stopAll();
   liveTimer();
@@ -676,6 +680,25 @@ async function camFlip(action, axis) {
   } catch (e) { sbIssue(`${name}: ${e.message}`); }
   b.disabled = false;
 }
+// camera date and time (camtime.py): read quietly with the view; the button sets it from central's clock
+async function camTime(action) {
+  if (!current) return toast("Load a camera first");
+  let json; try { json = readForm(); } catch (e) { return toast(e.message); }
+  const b = $("btnTime"); b.disabled = true;
+  try {
+    const d = await api("/api/camtime", { json, action });
+    const off = d.offset_s;
+    b.classList.toggle("bad", !!d.ok && !!d.off);
+    b.textContent = d.ok && off != null ? `Sync time (${off >= 0 ? "+" : ""}${off} s)` : "Sync time";
+    b.title = `${(d.log || []).join("\n")}${d.ntp ? `\nNTP: ${d.ntp.enabled ? "on" : "off"} ${d.ntp.server || ""}` : ""}${d.type ? `\ntype: ${d.type}` : ""}\nClick: set it to central's time now (+ automatic sync when a time server is set).`;
+    const last = (d.log || []).slice(-1)[0] || "";
+    if (action === "read") { if (d.ok && d.off) sbIssue(`Camera clock ${last.replace("camera clock: ", "")}`); }
+    else if (d.ok) (d.off ? sbIssue : sbStep)(`Sync time: ${(d.log || []).join("; ")}`);
+    else sbIssue(`Sync time: ${last}`);
+  } catch (e) { if (action !== "read") sbIssue(`Sync time: ${e.message}`); }
+  b.disabled = false;
+}
+$("btnTime").onclick = () => camTime("sync");
 for (const [id, axis] of [["btnFlipV", "v"], ["btnFlipH", "h"]])
   $(id).onclick = () => camFlip($(id).dataset.state === "on" ? "off" : "on", axis);
 function ptzPoiStatus() {
@@ -1059,6 +1082,7 @@ function renderMarkers() {
     const row = document.createElement("div"); row.className = "mk";
     const pos = m[k] && typeof m[k] === "object" && m[k].pan != null ? `pan ${m[k].pan} tilt ${m[k].tilt} zoom ${m[k].zoom}` : "position not stored yet: Set";
     row.innerHTML = `<span class="no" title="${esc(pos)}">${esc(k)}</span><input class="nm" value="${esc(poiName(m[k]))}" title="${esc(pos)}">` +
+      `<button data-a="home" class="${homeNow() === Number(k) ? "primary" : ""}" title="${homeNow() === Number(k) ? "Home: the camera goes back here after a power / cable failure. Click: no home" : "Make this the home point: the camera goes back here after a power / cable failure"}">&#8962;</button>` +
       `<button data-a="go" title="Move the camera to this point">Go</button>` +
       `<button data-a="here" title="Store the camera's current position as this point">Set</button>` +
       `<button data-a="del" title="Not interested any more: off the list (the camera keeps its preset; the number is not reused)">&times;</button>`;
@@ -1070,11 +1094,26 @@ function renderMarkers() {
       const d = await ptz("set_preset", { preset: Number(k), token: poiToken(m[k]) }); if (!d || !d.ok) return;
       const st = await positionNow(), x = markersNow(); x[k] = poiAt(poiName(x[k]), st, d.token && d.token !== String(Number(k)) ? d.token : null); setMarkers(x);
       sbStep(`${k} ${poiName(x[k])}: position stored${x[k].pan != null ? ` (pan ${x[k].pan} tilt ${x[k].tilt} zoom ${x[k].zoom})` : ""}${x[k].token ? ` (camera preset ${x[k].token})` : ""}`); };
+    row.querySelector('[data-a="home"]').onclick = () => setHome(homeNow() === Number(k) ? 0 : Number(k));
     row.querySelector('[data-a="del"]').onclick = () => {        // off the list; its number is never given out again
       current.json.poi_last = poiLast(); const x = markersNow(); delete x[k]; setMarkers(x); sbStep(`point ${k} removed from the list (number ${k} stays retired)`); };
     box.appendChild(row);
   }
   $("mkNo").textContent = nextPoi(m);
+}
+// Home POI (camera.ptz_home): after a power / cable failure the edge sends the camera there. Missing = 01 when
+// there is a point 01 (the edge does the same); 0 = no home.
+const homeField = () => document.getElementById("f_camera_ptz_home");
+function homeNow() {
+  const f = homeField(), v = f ? (f.value === "" ? null : Number(f.value)) : current?.json?.camera?.ptz_home;
+  if (v === null || v === undefined || Number.isNaN(v)) return "01" in markersNow() ? 1 : 0;
+  return Number(v);
+}
+function setHome(n) {
+  if (homeField()) homeField().value = n; else if (current) (current.json.camera ||= {}).ptz_home = n;
+  renderMarkers();
+  sbStep(n ? `home POI ${String(n).padStart(2, "0")}: the camera goes back there after a power / cable failure; Save to camera and edge keeps it`
+           : "no home POI: after a power / cable failure the camera stays where it starts; Save to camera and edge keeps it");
 }
 // The next point gets the number after the highest ever used (kept as "poi_last"), never a freed one.
 function poiLast() { return Math.max(Number((current && current.json.poi_last) || 0), ...Object.keys(markersNow()).map(Number), 0); }

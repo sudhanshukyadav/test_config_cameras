@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 import camset
 import discover as dc
 import camflip
+import camtime
 import osd
 import test_protocol as tp
 
@@ -345,6 +346,33 @@ def same_ip(data) -> dict:
     return out
 
 
+def index_clash(data) -> str:
+    """camera.index must be unique per site (it gives the camera's Modbus registers); '' when fine."""
+    cam = data.get("camera") or {}
+    try:
+        idx = int(cam.get("index") or 0)
+    except (TypeError, ValueError):
+        return "camera.index must be a whole number (0 = none)"
+    if idx < 0 or idx > 99:
+        return "camera.index: 1 to 99 (0 = no Modbus registers)"
+    if not idx:
+        return ""
+    site, name, host = (str(cam.get("site") or "").upper(), str(cam.get("name") or ""), str(cam.get("host") or "").strip())
+    folder = central_base()
+    if not folder or not os.path.isdir(folder):
+        return ""
+    for other, doc in _camera_jsons(folder):
+        c = doc["camera"]
+        try:
+            o_idx = int(c.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if (str(c.get("site") or "").upper() == site and o_idx == idx and str(c.get("name") or "") != name
+                and str(c.get("host") or "").strip() != host):
+            return f"camera.index {idx} is already used on site {site} by {c.get('name')} ({other}): choose another"
+    return ""
+
+
 EDGE_ANSWER_SEC = 10    # how long Save waits for multy.py's answer (cameras.ack)
 LOCK_SUFFIX = "_config.lock"   # <edge base>/<camera>_config.lock: this page has the camera open (multy.py: no events)
 
@@ -429,6 +457,9 @@ def save_all(data) -> dict:
     and the Sensor / Encoder values go to the camera."""
     steps = []
     fn = camera_file(data)
+    clash = index_clash(data)
+    if clash:
+        return {"file": fn, "steps": [{"ok": False, "step": clash}]}
     chk = same_ip(data)
     host = (data.get("camera") or {}).get("host")
     me = str((data.get("camera") or {}).get("name") or "").strip()
@@ -899,6 +930,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, identify_ip(b))
             if u.path == "/api/camflip":               # flip@camera: the camera's own flip, set at once (no Save)
                 return self._send(200, camera_flip(b["json"], b.get("action", "read"), b.get("axis", "v")))
+            if u.path == "/api/camtime":               # the camera's clock: read, or set from central's (+ NTP)
+                return self._send(200, camtime.handle(b["json"], b.get("action", "read"), pull_config()))
             if u.path == "/api/osd":
                 return self._send(200, osd.handle(b["json"], b.get("action", "read")))
             if u.path == "/api/snapshot":

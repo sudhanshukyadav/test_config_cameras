@@ -1,0 +1,198 @@
+warning: in the working copy of 'PLAN.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web_ui.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/PLAN.md b/PLAN.md[m
+[1mindex 4e94a98..56fdcca 100644[m
+[1m--- a/PLAN.md[m
+[1m+++ b/PLAN.md[m
+[36m@@ -27,7 +27,7 @@[m [mactually sends **2304x1296, 15 fps, GOP 90** (measured 2026-11-08).[m
+   are tuning values that can't be measured: keep them from the existing camera JSON if one is given,[m
+   otherwise use defaults from a template.[m
+ - The keys multy.py reads must be present: `camera.host/port/username/password/vendor`,[m
+[31m-  stream paths (or Dahua `channel` + `main_stream_subtype`/`sub_stream_subtype`), `invert_stream`,[m
+[32m+[m[32m  stream paths (or Dahua `channel` + `main_stream_subtype`/`sub_stream_subtype`), `flip_stream`,[m
+   `http_port`, `ptz_protocol`, `connection.rtsp_transport`, `stream_encoder_properties.fps /[m
+   main_stream_resolution / sub_stream_resolution`, and the `motion` keys.[m
+ - Written to `C:\Users\sudha\camtest\out\<name>.json` (git-ignored, because it holds the password),[m
+[36m@@ -195,3 +195,22 @@[m [mpython C:\Users\sudha\camtest\test_protocol.py gate --test[m
+   it, or identify fails for any other reason.[m
+ - A model with `ptz_position: false` (e.g. YM800S5: shows P/T/Z on its OSD, reports 0,0,0 over ONVIF) gets[m
+   `camera.ptz_position: false` in its JSON and a note; its events are named P00T00Z00.[m
+[32m+[m
+[32m+[m[32m## Orientation, motion while configuring, events (decisions 2026-11-11)[m
+[32m+[m
+[32m+[m[32m- **Flip:** set on the camera itself when it can: **flip@camera** button on the PTZ page (camflip.py; sets the[m
+[32m+[m[32m  camera's own flip at once, Dahua VideoInOptions Flip / ONVIF VideoSourceConfiguration Rotate; no Save). `camera.flip_stream` (page 1 field only, unrelated to flip@camera;[m
+[32m+[m[32m  old name `invert_stream`, still read) only when the camera cannot; used sparingly, never together with the[m
+[32m+[m[32m  camera's own Flip. Then multy.py flips snapshots, motion and live, clips get a 180° tag, the camera's OSD is[m
+[32m+[m[32m  switched off and the edge writes our date / title (unticking switches the camera's OSD back on). The view[m
+[32m+[m[32m  in the tool always shows the picture as the camera sends it (red notice "flip_stream is ON"). How a camera[m
+[32m+[m[32m  is mounted is irrelevant to the software; the installer decides. The edge never mirrors.[m
+[32m+[m[32m- **Events:** an event starts above `motion_threshold_min`; once running it stays alive while the biggest[m
+[32m+[m[32m  object is above `keep_alive_ratio` (default 0.25) of it, so a person walking away and coming back is one[m
+[32m+[m[32m  event. `post_roll_buffer_sec` ends it, then `cooldown_period_sec` blocks new events: keep the cooldown[m
+[32m+[m[32m  short (a few seconds), set per camera.[m
+[32m+[m[32m- **Backlog:** lock events (no motion detection on the edge) for a camera without a PTZ position reading[m
+[32m+[m[32m  while its configuration file is open in the tool, until the editing is finished (moving it, or switching[m
+[32m+[m[32m  its OSD, made false events on FLP Gallery).[m
+[32m+[m[32m- **Done 2026-11-11:** one term, "flip", on the page, in the manual and in the JSON (`flip_stream`; the old[m
+[32m+[m[32m  `invert_stream` is still read and rewritten as `flip_stream` on Save). The edge only flips, never mirrors.[m
+[1mdiff --git a/test_protocol.py b/test_protocol.py[m
+[1mindex 7d4dafc..0f9efcb 100644[m
+[1m--- a/test_protocol.py[m
+[1m+++ b/test_protocol.py[m
+[36m@@ -583,7 +583,7 @@[m [mGENERIC_RTSP_PATHS = ["/live/ch0", "/live/ch1", "/onvif1", "/onvif2", "/11", "/1[m
+ JSON_TEMPLATE = {[m
+     "camera": {"name": "", "site": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,[m
+                "http_port": 80, "username": "admin", "password": "",[m
+[31m-               "invert_stream": False, "ptz_markers": {}},[m
+[32m+[m[32m               "flip_stream": False, "ptz_markers": {}},[m[41m[m
+     "connection": {"rtsp_transport": "tcp", "buffer_size": 1},[m
+     "sensor_hardware_properties": {[m
+         "brightness": 50, "contrast": 50, "saturation": 50, "sharpness": 40,[m
+[36m@@ -870,7 +870,9 @@[m [mdef build_camera_json(cfg, base, ptz_protocol, main, sub, encoder, copy_ok, repo[m
+                 "ptz_protocol": ptz_protocol, "host": cfg["host"], "port": cfg["port"],[m
+                 "http_port": cfg["http_port"], "username": cfg["username"],[m
+                 "password": cfg["password"]})[m
+[31m-    cam.setdefault("invert_stream", False)[m
+[32m+[m[32m    if "invert_stream" in cam:                      # old name of flip_stream[m[41m[m
+[32m+[m[32m        cam.setdefault("flip_stream", bool(cam.pop("invert_stream")))[m[41m[m
+[32m+[m[32m    cam.setdefault("flip_stream", False)[m[41m[m
+     if main and main.get("subtype") is not None:[m
+         cam["channel"] = cfg.get("channel", 1)[m
+         cam["main_stream_subtype"] = main["subtype"][m
+[1mdiff --git a/web/index.html b/web/index.html[m
+[1mindex d030ceb..641cd7f 100644[m
+[1m--- a/web/index.html[m
+[1m+++ b/web/index.html[m
+[36m@@ -77,6 +77,7 @@[m [mbutton { background: var(--pad); border: 1px solid var(--line); border-radius: 6[m
+ button:hover { border-color: var(--accent); }[m
+ button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }[m
+ button.sel { outline: 2px solid var(--accent); }[m
+[32m+[m[32mbutton.camflip.on { background: #1f6feb; color: #fff; border-color: #1f6feb; }[m
+ button:disabled { opacity: .5; cursor: default; }[m
+ input, select, textarea { background: var(--input); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; width: 100%; min-width: 0; }[m
+ input[type=checkbox] { width: auto; }[m
+[36m@@ -121,7 +122,12 @@[m [mpre.log { background: var(--code); border: 1px solid var(--line); border-radius:[m
+ .snap { position: relative; user-select: none; -webkit-user-select: none; }[m
+ .snap img { pointer-events: none; -webkit-user-drag: none; }[m
+ .snap img { width: 100%; height: 100%; object-fit: fill; display: block; }[m
+[31m-.snap.inv img { transform: rotate(180deg); }   /* invert_stream: shown as the edge records it (multy.py turns it) */[m
+[32m+[m[32m/* flip_stream: the picture is shown as the CAMERA sends it; only the edge (multy.py) flips it */[m
+[32m+[m[32m.field .flipnote { display: inline-block; margin-left: 8px; background: #c62828; color: #fff; font: 600 11px/1.2 system-ui, sans-serif;[m
+[32m+[m[32m  padding: 2px 6px; border-radius: 4px; vertical-align: middle; }[m
+[32m+[m[32m.snap.flip::after { content: "flip_stream (page 1) is ON \2014  software flips the recordings; this view is the camera's"; position: absolute;[m
+[32m+[m[32m  top: 6px; left: 50%; transform: translateX(-50%); background: #c62828; color: #fff; font: 600 12px/1.2 system-ui, sans-serif;[m
+[32m+[m[32m  padding: 4px 10px; border-radius: 4px; pointer-events: none; z-index: 2; white-space: nowrap; }[m
+ .snap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }[m
+ .snap.drawing canvas { cursor: crosshair; }[m
+ /* camera view: a floating window, dragged by its title bar, resized at its lower right corner */[m
+[36m@@ -205,7 +211,7 @@[m [mpre.log { background: var(--code); border: 1px solid var(--line); border-radius:[m
+     <select id="snapWhich" style="width:auto"><option value="sub">sub stream</option><option value="main">main stream</option></select>[m
+     <button id="btnSnap">Refresh</button>[m
+     <label class="row muted" style="gap:4px" title="Ticked: a fresh picture every 5 s and one after each move. Unticked: only after a move or Refresh"><input type="checkbox" id="liveSnap" checked> live</label>[m
+[31m-    <label class="row muted" style="gap:4px" title="camera.invert_stream: the camera hangs upside down; the edge (multy.py) turns snapshots, motion and clips by 180°. The camera itself is not changed, so the picture here is turned by the page to show what the edge will record. Saved with Save to camera and edge"><input type="checkbox" id="vInvert"> upside down</label>[m
+[32m+[m[32m    <button id="btnFlipV" class="camflip" title="Flip vertical (top-bottom): written directly into the CAMERA, at once (no Save). Blue = on. Not related to flip_stream on page 1.">Flip V</button><button id="btnFlipH" class="camflip" title="Flip horizontal (left-right): written directly into the CAMERA, at once (no Save). Blue = on. Not related to flip_stream on page 1.">Flip H</button>[m
+     <button id="btnDrawZone" title="Drag on the picture: an area motion detection ignores (exclude_zones; several allowed)">Exclude zone</button>[m
+     <button id="btnDrawRoi" title="Drag on the picture: the only area motion detection watches (roi_crop, turns on use_roi)">ROI</button>[m
+     <button id="btnClearZones" title="Remove all exclude zones">Clear zones</button>[m
+[36m@@ -340,7 +346,7 @@[m [mconst HINTS = {[m
+   "camera.main_stream_path": "RTSP path of the recorded stream, e.g. /live/ch0",[m
+   "camera.sub_stream_path": "RTSP path used for motion detection",[m
+   "camera.main_rtsp_url": "full RTSP URL; overrides the path", "camera.sub_rtsp_url": "full RTSP URL; overrides the path",[m
+[31m-  "camera.invert_stream": "picture is upside down (ceiling mount)",[m
+[32m+[m[32m  "camera.flip_stream": "flip (done by the edge): only if the camera cannot flip its picture itself. Use sparingly; never together with the camera's own Flip",[m
+   "camera.ptz_markers": "points of interest: number, name and PTZ position (set them on the view page)",[m
+   "connection.rtsp_transport": "tcp is reliable; udp can lose packets",[m
+   "connection.buffer_size": "*",[m
+[36m@@ -373,6 +379,8 @@[m [mconst SECTION_HINTS = {[m
+ [m
+ function withDefaults(json) {[m
+   const out = JSON.parse(JSON.stringify(json));[m
+[32m+[m[32m  const c0 = out.camera;                       // invert_stream = the old name of flip_stream[m
+[32m+[m[32m  if (c0 && "invert_stream" in c0) { if (!("flip_stream" in c0)) c0.flip_stream = !!c0.invert_stream; delete c0.invert_stream; }[m
+   if (!TEMPLATE) return out;[m
+   for (const [sec, obj] of Object.entries(TEMPLATE)) {[m
+     if (!(sec in out)) { out[sec] = JSON.parse(JSON.stringify(obj)); continue; }[m
+[36m@@ -460,7 +468,7 @@[m [mfunction setCurrent(c) {[m
+   $("snap").textContent = "no picture"; stopAll(false);[m
+   loadList();[m
+   EDGE.key = ""; edgeCheck();[m
+[31m-  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); }[m
+[32m+[m[32m  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); }[m
+ }[m
+ [m
+ // ---- camera ID = site_camera: the OSD title and the file name (site_camera.json)[m
+[36m@@ -496,7 +504,7 @@[m [mfunction showPage(n) {[m
+   if (n === 2) {[m
+     fitPicture(); setTimeout(() => window.dispatchEvent(new Event("resize")), 0);[m
+     refreshSnap();[m
+[31m-    if (!OSD.read && camNow()?.host) osdCall("read"); else osdSummary();[m
+[32m+[m[32m    if (!OSD.read && camNow()?.host) { osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); } else osdSummary();[m
+     if ((camNow() || {}).ptz_protocol !== "none") ptz("status");[m
+   } else stopAll();[m
+   liveTimer();[m
+[36m@@ -596,24 +604,59 @@[m [mfunction buildForm(json) {[m
+   }[m
+   ownTicks();[m
+   wireIdentify();[m
+[31m-  const inv = document.getElementById("f_camera_invert_stream");[m
+[31m-  $("vInvert").checked = !!(inv && inv.checked); showInvert();[m
+[31m-  if (inv) inv.addEventListener("change", () => { $("vInvert").checked = inv.checked; showInvert(); });[m
+[32m+[m[32m  const inv = document.getElementById("f_camera_flip_stream");[m
+[32m+[m[32m  showFlip(); camFlipShow("v", null); camFlipShow("h", null);[m
+[32m+[m[32m  if (inv) inv.addEventListener("change", flipStreamChanged);[m
+   const ucp = document.getElementById("f_osd_use_camera_positions");[m
+   if (ucp) ucp.addEventListener("change", () => { osdPositionsLock(); if (ucp.checked && OSD.read) osdFromCamera(); drawOverlay(); });[m
+   osdPositionsLock();[m
+   showPage(PAGE === 2 ? 2 : 1);[m
+ }[m
+[31m-// invert_stream: the camera is not changed (most cannot turn their picture); multy.py turns what the edge[m
+[31m-// records, so the page turns the picture to show that. Zones / ROI are drawn on the turned picture, as multy.py uses them.[m
+[31m-function showInvert() { $("snap").classList.toggle("inv", $("vInvert").checked); }[m
+[31m-$("vInvert").onchange = () => {[m
+[31m-  const inv = document.getElementById("f_camera_invert_stream");[m
+[31m-  if (inv) inv.checked = $("vInvert").checked;[m
+[31m-  showInvert();[m
+[31m-  sbStep($("vInvert").checked ? "upside down: the edge turns snapshots, motion and clips by 180° (Save to camera and edge to use it)"[m
+[31m-                             : "upside down off (Save to camera and edge to use it)");[m
+[31m-};[m
+[32m+[m[32m// flip_stream (decided 2026-11-11): only multy.py turns the picture; the camera is never asked to flip and[m
+[32m+[m[32m// this view shows the picture as the camera sends it (red notice on it). Zones, ROI and our own date / title[m
+[32m+[m[32m// are stored for the TURNED picture (what multy.py analyses and writes), so the overlay is drawn turned here.[m
+[32m+[m[32mfunction isFlip() { return !!document.getElementById("f_camera_flip_stream")?.checked; }[m
+[32m+[m[32mfunction showFlip() { $("snap").classList.toggle("flip", isFlip()); drawOverlay(); }[m
+[32m+[m[32mfunction flipRect(r) { return [r3(1 - r[2]), r3(1 - r[3]), r3(1 - r[0]), r3(1 - r[1])]; }[m
+[32m+[m[32m// page 1 flip_stream (the EDGE flips): zones / ROI follow, the camera's OSD goes off, our own text on[m
+[32m+[m[32mfunction flipStreamChanged() {[m
+[32m+[m[32m  // zones / ROI stay on the same spot of the scene: their coordinates follow the turn[m
+[32m+[m[32m  const z = zonesNow().filter(r => Array.isArray(r) && r.length === 4).map(flipRect);[m
+[32m+[m[32m  if (fld("exclude_zones")) fld("exclude_zones").value = JSON.stringify(z);[m
+[32m+[m[32m  if (roiNow() && fld("roi_crop")) fld("roi_crop").value = flipRect(roiNow()).join(", ");[m
+[32m+[m[32m  showFlip();[m
+[32m+[m[32m  sbStep(isFlip() ? "flip_stream ON: multy.py (software) flips the recordings (Save to camera and edge to use it)" : "flip_stream off (Save to camera and edge to use it)");[m
+[32m+[m[32m}[m
+[32m+[m[32m// PTZ page: Flip = the camera's OWN flip, set at once on the camera (no Save); unrelated to flip_stream[m
+[32m+[m[32mfunction camFlipShow(axis, d) {[m
+[32m+[m[32m  const b = $(axis === "h" ? "btnFlipH" : "btnFlipV"); if (!b) return;[m
+[32m+[m[32m  b.dataset.state = !d ? "?" : d.flip === true ? "on" : d.flip === false ? "off" : "?";[m
+[32m+[m[32m  b.classList.toggle("on", !!(d && d.flip));            // blue = on in the camera[m
+[32m+[m[32m}[m
+[32m+[m[32masync function camFlip(action, axis) {[m
+[32m+[m[32m  if (!current) return toast("Load a camera first");[m
+[32m+[m[32m  let json; try { json = readForm(); } catch (e) { return toast(e.message); }[m
+[32m+[m[32m  const b = $(axis === "h" ? "btnFlipH" : "btnFlipV"), name = axis === "h" ? "Flip horizontal" : "Flip vertical";[m
+[32m+[m[32m  b.disabled = true;[m
+[32m+[m[32m  try {[m
+[32m+[m[32m    const d = await api("/api/camflip", { json, action, axis });[m
+[32m+[m[32m    // a camera that does not report its state (flip = null): the last press that changed the picture counts[m
+[32m+[m[32m    const memo = `camflip:${axis}:${json.camera?.host || ""}`;[m
+[32m+[m[32m    if (d.flip === null && (d.supported || action !== "read")) {[m
+[32m+[m[32m      if (action !== "read" && d.ok) localStorage.setItem(memo, action);[m
+[32m+[m[32m      const last = localStorage.getItem(memo);[m
+[32m+[m[32m      if (last) d.flip = last === "on";[m
+[32m+[m[32m    }[m
+[32m+[m[32m    camFlipShow(axis, d);[m
+[32m+[m[32m    const last = (d.log || []).slice(-1)[0] || "";[m
+[32m+[m[32m    if (action === "read") { /* quiet: a camera without this setting just leaves the button plain */ }[m
+[32m+[m[32m    else if (d.ok) { (d.as_asked === false && d.picture ? sbIssue : sbStep)(`${name} ${action

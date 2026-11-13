@@ -581,7 +581,7 @@ GENERIC_RTSP_PATHS = ["/live/ch0", "/live/ch1", "/onvif1", "/onvif2", "/11", "/1
 
 # Used when no existing camera JSON is given (same layout as edge_worker/livingroom.json).
 JSON_TEMPLATE = {
-    "camera": {"name": "", "site": "", "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
+    "camera": {"name": "", "site": "", "index": 0, "vendor": "generic", "ptz_protocol": "none", "host": "", "port": 554,
                "http_port": 80, "username": "admin", "password": "",
                "flip_stream": False, "ptz_markers": {}},
     "connection": {"rtsp_transport": "tcp", "buffer_size": 1},
