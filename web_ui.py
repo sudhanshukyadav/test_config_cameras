@@ -14,6 +14,7 @@ import ipaddress
 import io
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -68,14 +69,44 @@ def _fit_resolution(w: int, h: int, lim: dict) -> tuple[int, int]:
     return int(w * f) // 16 * 16, int(h * f) // 16 * 16
 
 
-def apply_stream_limit(data: dict, lim: dict | None) -> list[str]:
+def effective_limit(data: dict, plant: dict | None) -> tuple[dict | None, bool]:
+    """(limit for this camera, own?): the camera file's stream_limit_override (set on the O&M page,
+    Website tab, for a camera whose pictures need the detail), else the plant's limit."""
+    o = data.get("stream_limit_override")
+    if isinstance(o, dict):
+        lim = dict(plant or STREAM_LIMIT_DEFAULT)
+        for k in STREAM_LIMIT_DEFAULT:
+            try:
+                if o.get(k):
+                    lim[k] = int(o[k])
+            except (TypeError, ValueError):
+                pass
+        return lim, True
+    return plant, False
+
+
+def apply_stream_limit(data: dict, lim: dict | None, raise_to_limit: bool = False) -> list[str]:
     """Caps the main stream in the camera JSON to the limit (written into the camera by Save); returns what
-    was changed. The limit itself goes into the JSON (stream_limit) so the edge can check the camera."""
+    was changed. The limit itself goes into the JSON (stream_limit) so the edge can check the camera.
+    raise_to_limit (a camera with its own, higher limit): the resolution goes UP to the biggest usual one of
+    its shape within the limit, and the bitrate to the limit."""
     if not lim:
         data.pop("stream_limit", None)
         return []
     enc = data.setdefault("stream_encoder_properties", {})
     notes = []
+    if raise_to_limit:
+        try:
+            w, h = (int(v) for v in enc.get("main_stream_resolution") or (16, 9))
+        except (TypeError, ValueError):
+            w, h = 16, 9
+        nw, nh = _fit_resolution(w, h, lim)
+        if [nw, nh] != list(enc.get("main_stream_resolution") or []):
+            notes.append(f"main resolution {enc.get('main_stream_resolution')} -> {nw}x{nh} (own limit)")
+            enc["main_stream_resolution"] = [nw, nh]
+        if int(enc.get("bitrate_kbps") or 0) != lim["max_kbps"]:
+            notes.append(f"bitrate {enc.get('bitrate_kbps') or '?'} -> {lim['max_kbps']} kbps (own limit)")
+            enc["bitrate_kbps"] = lim["max_kbps"]
     res = enc.get("main_stream_resolution")
     try:
         w, h = int(res[0]), int(res[1])
@@ -109,17 +140,53 @@ def apply_stream_limit(data: dict, lim: dict | None) -> list[str]:
     return notes
 
 
-def pull_config() -> dict:
-    """The AiSys central pull.json (next to this repo, or in AISYS_CONFIG_DIR)."""
+def pull_path() -> str | None:
+    """Where the AiSys central pull.json is (AISYS_CONFIG_DIR, or next to this repo)."""
     for p in (os.path.join(os.environ.get("AISYS_CONFIG_DIR", ""), "pull.json"),
               os.path.join(tp.SCRIPT_DIR, "..", "aivision", "site", "pull.json")):
         if p and os.path.isfile(p):
-            try:
-                with open(p, encoding="utf-8-sig") as f:
-                    return json.load(f)
-            except (OSError, ValueError):
-                pass
+            return p
+    return None
+
+
+def pull_config() -> dict:
+    """The AiSys central pull.json (next to this repo, or in AISYS_CONFIG_DIR)."""
+    p = pull_path()
+    if p:
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
     return {}
+
+
+def autocorrect_on() -> bool:
+    """O&M page, Website tab, "Auto-correct wrong values on Save" (site_settings.json next to pull.json;
+    on when never set)."""
+    p = pull_path()
+    try:
+        with open(os.path.join(os.path.dirname(p), "site_settings.json"), encoding="utf-8") as f:
+            return bool(json.load(f).get("stream_autofix", True))
+    except (TypeError, OSError, ValueError):
+        return True
+
+
+def note_correction(camera: str, found: str, result: str, ok: bool) -> None:
+    """The O&M page's "Last corrections" (stream_autofix.json next to pull.json, the last 50)."""
+    p = pull_path()
+    if not p:
+        return
+    path = os.path.join(os.path.dirname(p), "stream_autofix.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            log = json.load(f)
+    except (OSError, ValueError):
+        log = []
+    log.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "camera": camera, "found": found, "result": result, "ok": ok})
+    with contextlib.suppress(OSError):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(log[-50:], f, indent=1)
 
 
 def local_path(raw: str) -> str:
@@ -279,6 +346,28 @@ def same_ip(data) -> dict:
 
 
 EDGE_ANSWER_SEC = 10    # how long Save waits for multy.py's answer (cameras.ack)
+LOCK_SUFFIX = "_config.lock"   # <edge base>/<camera>_config.lock: this page has the camera open (multy.py: no events)
+
+
+def config_lock(b: dict) -> dict:
+    """While a camera is open on this page, the page asks every 20 s to keep <edge base>/<camera>_config.lock
+    fresh; multy.py then makes no events for it (only cameras whose PTZ position cannot be read; it pauses on
+    a position change otherwise). action "release": the lock goes (page closed, another camera opened); a lock
+    not refreshed for 60 s is over anyway (decided 2026-11-11)."""
+    site, name = str(b.get("site") or "").strip().upper(), str(b.get("name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+        return {"ok": False, "error": "camera name"}
+    folder = edge_shares().get(site)
+    if not folder or not os.path.isdir(folder):
+        return {"ok": False, "error": f"no edge base for site {site or '?'}"}
+    path = os.path.join(folder, name + LOCK_SUFFIX)
+    if b.get("action") == "release":
+        with contextlib.suppress(OSError):
+            os.remove(path)
+        return {"ok": True, "locked": False}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"by": "camera tool", "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f)
+    return {"ok": True, "locked": True}
 
 
 def tell_central(fn: str) -> dict:
@@ -359,11 +448,24 @@ def save_all(data) -> dict:
         cam_d.setdefault("flip_stream", bool(cam_d.get("invert_stream")))
         cam_d.pop("invert_stream", None)
     data["storage"] = {"central_base": (pc.get("central_storage") or {}).get("mount_path"), "edge_base": edge_raw}
-    lim = stream_limit(pc)
-    capped = apply_stream_limit(data, lim)
-    if capped:
-        steps.append({"ok": True, "step": f"stream limit ({lim['max_width']}x{lim['max_height']}, {lim['max_fps']} fps, "
-                                          f"{lim['max_kbps']} kbps): " + "; ".join(capped)})
+    lim, own = effective_limit(data, stream_limit(pc))
+    who = f"{site_u}/{me}"
+    if own or autocorrect_on():          # own limit: set on the O&M page on purpose, always applied
+        capped = apply_stream_limit(data, lim, raise_to_limit=own)
+        if capped:
+            steps.append({"ok": True, "step": f"stream limit{' (own, this camera)' if own else ''} ({lim['max_width']}x{lim['max_height']}, "
+                                              f"{lim['max_fps']} fps, {lim['max_kbps']} kbps): " + "; ".join(capped)})
+            if not own:
+                note_correction(who, "entered over the limit", "; ".join(capped), True)
+    else:                                # auto-correct off: saved as entered, reported
+        trial = json.loads(json.dumps(data))
+        over = apply_stream_limit(trial, lim)
+        if lim:
+            data["stream_limit"] = dict(lim)         # the edge still checks the camera against it
+        if over:
+            steps.append({"ok": False, "step": f"over the stream limit, NOT corrected (auto-correct is off on the O&M page, "
+                                               f"Website tab): would be " + "; ".join(over)})
+            note_correction(who, "entered over the limit", "not corrected (auto-correct off)", False)
     for where, folder in (("central", chk["central"]), ("edge", chk["edge"])):
         if not folder:
             steps.append({"ok": False, "step": f"no edge base known for site {(data.get('camera') or {}).get('site') or '?'} (pull.json)"})
@@ -775,6 +877,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"saved": save_out(b["file"], b["json"])})
             if u.path == "/api/test":
                 return self._send(200, run_test(b["json"]))
+            if u.path == "/api/config_lock":
+                return self._send(200, config_lock(b))
             if u.path == "/api/same_ip":
                 return self._send(200, same_ip(b["json"]))
             if u.path == "/api/save_all":

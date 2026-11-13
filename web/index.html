@@ -317,6 +317,15 @@ const CHOICES = {
 };
 let current = null;   // {where, file, json, report}
 let TEMPLATE = null;  // default JSON from the server; missing keys are filled from it
+// Always offered, also when the server's template is older or did not answer: an old camera file still gets
+// every field (filled with these defaults) so it can be set and saved.
+const FIELD_DEFAULTS = {
+  motion: { enabled: true, heartbeat_interval_sec: 0, motion_threshold_min: 1800, max_lighting_ratio: 0.6, initial_snap_delay_sec: 1.0,
+            post_roll_buffer_sec: 5.0, pre_roll_sec: 0.0, cooldown_period_sec: 10.0, min_motion_sec: 0.6,
+            min_travel: 0.03, min_clip_sec: 10.0, min_texture: 20.0, gray: true, keep_alive_ratio: 0.25,
+            draw_motion_box: true, exclude_zones: [], use_roi: false, roi_crop: [0.2, 0.2, 0.8, 0.8] },
+  face_quality: { enabled: true, min_face_width: 120, min_face_height: 120 },
+};
 
 // What each key does. "*" = used by the agents, not by the edge recorder (shown blue on the page).
 const HINTS = {
@@ -362,14 +371,22 @@ const HINTS = {
   "motion.max_lighting_ratio": "ignore when more than this share of the frame changes (lights, IR switch), 0–1",
   "motion.initial_snap_delay_sec": "wait this long after motion starts before the first snapshot",
   "motion.post_roll_buffer_sec": "keep recording this long after motion stops",
+  "stream_limit_override": "* this camera's own stream limit (set on the O&M page, Website tab: e.g. a camera whose pictures need the detail); Save raises the camera up to it",
   "stream_limit": "* the plant's stream limit, written here on Save (pull.json settings.stream_limit); the edge checks the camera against it",
   "motion.pre_roll_sec": "seconds recorded BEFORE motion starts (held in the edge's RAM). Entry / exit cameras: 3. 0 = off: the main stream is opened only on motion, so the clip starts 1–4 s late",
   "motion.cooldown_period_sec": "after an event, ignore new motion for this long",
+  "motion.min_motion_sec": "an object must be followed this long before it triggers (seconds)",
+  "motion.min_travel": "and its centre must move this share of the picture diagonal (0.03 = 3 %); things that stay put are ignored",
+  "motion.min_clip_sec": "every clip lasts at least this long after the trigger",
+  "motion.min_texture": "light is not an object: the object must bring its own pattern (people 40–130, light up to ~11). 0 = off",
+  "motion.gray": "find motion on the black & white picture (less colour noise); off = colour",
+  "motion.keep_alive_ratio": "a running event stays alive while the object is at least this share of the threshold",
   "motion.draw_motion_box": "draw a box around the motion on snapshots",
   "motion.exclude_zones": "areas to ignore: [[x1, y1, x2, y2], …] as 0–1 fractions. Draw them on the picture →",
   "motion.use_roi": "only watch the roi_crop area",
   "motion.roi_crop": "area to watch when use_roi: x1, y1, x2, y2 as 0–1 fractions. Draw it on the picture →",
-  "motion.heartbeat_interval_sec": "*", "motion.grid_rows": "*", "motion.grid_cols": "*",
+  "motion.heartbeat_interval_sec": "seconds without an event snap before the edge checks the camera still sends a live picture (dead / frozen / blind opens a maintenance ticket, O&M page, OOS tab). 0 = no check; gates 60, rooms 900",
+  "motion.grid_rows": "*", "motion.grid_cols": "*",
   "motion.diff_multiplier_threshold": "*", "motion.bg_scan_frame_step": "*",
   "motion.min_sharpness": "*", "motion.min_brightness": "*", "motion.max_brightness": "*",
 };
@@ -383,11 +400,12 @@ function withDefaults(json) {
   const out = JSON.parse(JSON.stringify(json));
   const c0 = out.camera;                       // invert_stream = the old name of flip_stream
   if (c0 && "invert_stream" in c0) { if (!("flip_stream" in c0)) c0.flip_stream = !!c0.invert_stream; delete c0.invert_stream; }
-  if (!TEMPLATE) return out;
-  for (const [sec, obj] of Object.entries(TEMPLATE)) {
-    if (!(sec in out)) { out[sec] = JSON.parse(JSON.stringify(obj)); continue; }
-    if (obj && typeof obj === "object" && !Array.isArray(obj))
-      for (const [k, v] of Object.entries(obj)) if (!(k in out[sec])) out[sec][k] = JSON.parse(JSON.stringify(v));
+  for (const src of [TEMPLATE || {}, FIELD_DEFAULTS]) {
+    for (const [sec, obj] of Object.entries(src)) {
+      if (!(sec in out) || out[sec] === null) { out[sec] = JSON.parse(JSON.stringify(obj)); continue; }
+      if (obj && typeof obj === "object" && !Array.isArray(obj) && typeof out[sec] === "object")
+        for (const [k, v] of Object.entries(obj)) if (!(k in out[sec])) out[sec][k] = JSON.parse(JSON.stringify(v));
+    }
   }
   return out;
 }
@@ -470,6 +488,7 @@ function setCurrent(c) {
   $("snap").textContent = "no picture"; stopAll(false);
   loadList();
   EDGE.key = ""; edgeCheck();
+  lockHold();
   if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); }
 }
 
@@ -903,6 +922,25 @@ async function identifyCam(ip) {
 
 
 // ---- PTZ
+// No events while a camera is open here (multy.py, cameras whose PTZ position cannot be read; decided 2026-11-11):
+// the edge's <camera>_config.lock is kept fresh every 20 s and removed when another camera is opened or the
+// page is closed (a lock not refreshed for 60 s is over anyway).
+const LOCK = { key: null, cam: null };
+function lockCall(cam, action) {
+  if (!cam) return;
+  fetch(BASE + "/api/config_lock", { method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
+    body: JSON.stringify({ site: cam.site, name: cam.name, action }) }).catch(() => {});
+}
+function lockHold() {
+  const c = current && current.json && current.json.camera;
+  const key = c && c.site && c.name ? `${c.site}/${c.name}` : null;
+  if (LOCK.key && LOCK.key !== key) lockCall(LOCK.cam, "release");
+  LOCK.key = key; LOCK.cam = key ? { site: c.site, name: c.name } : null;
+  if (LOCK.cam) lockCall(LOCK.cam, "hold");
+}
+setInterval(lockHold, 20000);
+window.addEventListener("pagehide", () => { if (LOCK.cam) lockCall(LOCK.cam, "release"); });
+
 function camNow() { try { return readForm().camera; } catch { return current.json.camera; } }
 function updatePtzPanel() {
   const off = !current || (camNow() || {}).ptz_protocol === "none";

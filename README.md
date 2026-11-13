@@ -8,3 +8,5 @@ Config page with PTZ: `python web_ui.py`, then open http://127.0.0.1:8091.
 Find and identify unknown cameras: `python discover.py`, or Discover on the page.
 Add a camera by its IP (default logins tried first): **Add camera by IP** on the page.
 On the central PC also as the **Cameras** page of the AiSys local site: http://localhost:8080/cameras (admin).
+
+Every key of the camera JSON, its default and what it does: [CAMERA_JSON.md](CAMERA_JSON.md) (configuration manual).
