@@ -311,6 +311,45 @@ class DahuaCGIDriver:
         res = self._get(self.ptz_url, p)
         return res is not None and res.status_code == 200 and "ok" in res.text.lower()
 
+    abs_scale = 1.0    # PositionABS units per degree: 1 (degrees) or 10 (tenths), found on the first move
+
+    def absolute_move(self, pan: float, tilt: float, zoom: float | None = None) -> tuple[bool, dict, str]:
+        """Go to a typed position (PositionABS): pan and tilt in degrees as getStatus reports them, zoom in the
+        camera's own units (None = keep). Waits for the move, reads the position back. Firmware differs on the
+        unit (degrees or tenths): if the camera did not move with one, the other is tried once and kept."""
+        start, _ = self.read_ptz()
+        z = start["z"] if zoom is None else float(zoom)
+        pan = float(pan) % 360.0
+
+        def send(scale: float):
+            p = {"action": "start", "channel": self.channel, "code": "PositionABS",
+                 "arg1": round(pan * scale, 2), "arg2": round(float(tilt) * scale, 2), "arg3": round(z, 2)}
+            r = self._get(self.ptz_url, p, timeout=4)
+            ans = r.text.strip()[:80] if r is not None else "no answer"
+            return (r is not None and r.status_code == 200 and "ok" in ans.lower()), ans
+
+        def off(c: dict) -> float:
+            d = abs(c["x"] - pan) % 360.0
+            return round(max(min(d, 360.0 - d), abs(c["y"] - float(tilt))), 2)
+
+        ok, ans = send(self.abs_scale)
+        if not ok:
+            self.last_error = f"PositionABS refused: {ans}"
+            return False, start, self.last_error
+        coords, _ = self.wait_until_idle(timeout=15)
+        note = f"units {'degrees' if self.abs_scale == 1 else 'tenths of a degree'}"
+        moved = abs(coords["x"] - start["x"]) > 0.3 or abs(coords["y"] - start["y"]) > 0.3
+        if off(coords) > 2 and not moved and off(start) > 2:          # did not move at all: try the other unit
+            other = 10.0 if self.abs_scale == 1 else 1.0
+            ok2, ans2 = send(other)
+            c2, _ = self.wait_until_idle(timeout=15)
+            if ok2 and off(c2) < off(coords):
+                self.abs_scale, coords = other, c2
+                note = f"units {'degrees' if other == 1 else 'tenths of a degree'} (the other unit did not move it)"
+        note += f"; {off(coords)} deg from the target"
+        self.last_error = None
+        return True, coords, note
+
     def trigger_autofocus(self) -> bool:
         self._get(self.cfg_url, {"action": "setConfig", "VideoInFocus[0][0].Mode": 2})
         res = self._get(self.cfg_url, {"action": "setConfig", "VideoInFocus[0][0].Mode": 3})
@@ -566,6 +605,9 @@ def build_driver(cam_cfg: dict):
         return None
     if "dahua" in proto or proto == "dahua_cgi":
         return DahuaCGIDriver(cam_cfg)
+    if proto == "ws_soap":          # ONVIF moves, presets through the camera's /PresetList web interface (ipc_rpc.py)
+        import ipc_rpc
+        return ipc_rpc.make_ws_soap_driver(sys.modules[__name__], cam_cfg)
     return ONVIFSoapDriver(cam_cfg)
 
 

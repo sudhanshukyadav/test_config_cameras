@@ -10,6 +10,7 @@ the page then calls /cameras/api/... and the local site passes them on to this s
 """
 import argparse
 import contextlib
+import datetime
 import ipaddress
 import io
 import json
@@ -583,6 +584,10 @@ def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
         if old:
             old.cancel()
         ok = drv.stop()
+    elif action == "goto" and pos and isinstance(drv, tp.DahuaCGIDriver):   # a POI by its pan / tilt / zoom
+        ok, coords, note = drv.absolute_move(float(pos.get("x")), float(pos.get("y")),
+                                             None if pos.get("z") in (None, "") else float(pos.get("z")))
+        extra.update({"status": coords, "note": note, "by": "position"})
     elif action == "goto":
         ok = drv.goto_preset(token if token and isinstance(drv, tp.ONVIFSoapDriver) else int(preset))
         if ok:
@@ -598,13 +603,27 @@ def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
                 tp.log(name, f"ptz set_preset: the camera keeps this point as its preset {drv.last_preset_token}")
         else:
             ok = drv.set_preset(int(preset))
+    elif action == "absolute" and isinstance(drv, tp.DahuaCGIDriver):   # typed degrees (PositionABS)
+        pos = pos or {}
+        z = pos.get("z")
+        ok, coords, note = drv.absolute_move(float(pos.get("x", 0)), float(pos.get("y", 0)),
+                                             None if z in (None, "") else float(z))
+        extra.update({"status": coords, "note": note,
+                      "target": {"x": pos.get("x"), "y": pos.get("y"), "z": z}})
+        tp.log(name, f"ptz go to pan {pos.get('x')} tilt {pos.get('y')} zoom {z if z not in (None, '') else 'kept'}: "
+                     f"{'reached pan %s tilt %s zoom %s; %s' % (coords.get('x'), coords.get('y'), coords.get('z'), note) if ok else note}")
     elif action == "absolute":                       # go to typed pan / tilt / zoom (ONVIF generic spaces)
         if not isinstance(drv, tp.ONVIFSoapDriver):
-            raise ValueError("go to a typed position works on ONVIF PTZ cameras only (this one uses Dahua CGI)")
+            raise ValueError("go to a typed position is not built for this PTZ protocol")
         pos = pos or {}
         z = pos.get("z")
         ok = absolute_move(drv, pos.get("x", 0), pos.get("y", 0), None if z in (None, "") else z)
         extra["target"] = {"x": pos.get("x"), "y": pos.get("y"), "z": z}
+    elif action == "presets":                        # the presets the camera holds (ws_soap cameras: /getPresetList)
+        if not hasattr(drv, "get_presets"):
+            raise ValueError("listing the camera's presets is built for ws_soap cameras only")
+        extra["presets"] = drv.get_presets()
+        ok = True
     elif action == "autofocus":
         ok = drv.trigger_autofocus()
     elif action == "lens_init":
@@ -620,12 +639,60 @@ def ptz(cam, action, speed=None, preset=None, token=None, pos=None):
                          f"its answer: {raw}")
     else:
         raise ValueError(f"unknown action {action}")
+    if getattr(drv, "last_trace", None) and action in ("goto", "set_preset", "presets"):
+        extra["ipc"] = drv.last_trace              # what the camera answered (ws_soap: /PresetList)
     err = getattr(drv, "last_error", None)
     tp.log(name, f"ptz {action} {'OK' if ok else 'FAIL'}" + (f" {err}" if (err and not ok) else ""))
     return {"ok": ok, "error": None if ok else err, **extra}
 
 
 ABS_SPACE = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"
+
+
+def ptz_accept_test(cam):
+    """PTZ acceptance test (decided 2026-11-13: a PTZ camera must go to the pan / tilt / zoom we type; presets do not
+    matter). The camera must report its position, go to pan +10 deg and tilt +5 deg from where it is (each within
+    tolerance), and come back to the start. Dahua CGI only so far (degrees); other protocols fail with the reason.
+    Returns {ok, verdict, steps, result} - result goes into the camera file as camera.ptz_test."""
+    drv = get_driver(cam)
+    name = drv.display_name
+    steps: list = []
+    tol = 1.0                                   # degrees
+    when = datetime.datetime.now().isoformat(timespec="seconds")
+
+    def done(ok: bool, verdict: str):
+        for st in steps:
+            tp.log(name, f"PTZ acceptance test: {st}")
+        tp.log(name, f"PTZ acceptance test: {verdict}")
+        return {"ok": ok, "verdict": verdict, "steps": steps,
+                "result": {"passed": ok, "at": when, "verdict": verdict, "mode": "absolute" if ok else "none",
+                           "abs_scale": getattr(drv, "abs_scale", None)}}
+    if not isinstance(drv, tp.DahuaCGIDriver):
+        steps.append(f"protocol {tp.standardize_config(cam)['ptz_protocol']}: typed pan / tilt / zoom is built for "
+                     "Dahua CGI only so far")
+        return done(False, "FAIL: this camera cannot be sent to typed pan / tilt / zoom by our program")
+    start, _ = drv.read_ptz()
+    steps.append(f"position read: pan {start['x']} tilt {start['y']} zoom {start['z']}")
+    if not any((start["x"], start["y"], start["z"])):
+        return done(False, "FAIL: the camera reports no position (0, 0, 0)")
+    targets = [((start["x"] + 10) % 360, start["y"], "pan +10"),
+               ((start["x"] + 10) % 360, max(-89.0, min(89.0, start["y"] + 5)), "tilt +5"),
+               (start["x"], start["y"], "back to the start")]
+    worst = 0.0
+    for px, ty, label in targets:
+        ok, got, note = drv.absolute_move(px, ty, start["z"])
+        if not ok:
+            steps.append(f"{label}: refused ({note})")
+            return done(False, f"FAIL: the camera refused the move ({label})")
+        dp = abs(got["x"] - px) % 360
+        err = max(min(dp, 360 - dp), abs(got["y"] - ty))
+        worst = max(worst, err)
+        steps.append(f"{label}: target pan {round(px, 2)} tilt {round(ty, 2)} -> reached pan {got['x']} tilt {got['y']} "
+                     f"zoom {got['z']} ({round(err, 2)} deg off; {note})")
+        if err > tol:
+            return done(False, f"FAIL: {label} missed by {round(err, 2)} deg (tolerance {tol})")
+    return done(True, f"PASS: goes to typed pan / tilt and back (worst {round(worst, 2)} deg, tolerance {tol}); "
+                      "its POIs are reached by pan / tilt / zoom, no presets needed")
 
 
 def absmove_test(cam):
@@ -914,6 +981,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, same_ip(b["json"]))
             if u.path == "/api/save_all":
                 return self._send(200, save_all(b["json"]))
+            if u.path == "/api/ptz/accept_test":       # PTZ acceptance test: typed pan / tilt / zoom (camera moves)
+                return self._send(200, ptz_accept_test(b["camera"]))
             if u.path == "/api/ptz/absmove_test":
                 return self._send(200, absmove_test(b["camera"]))
             if u.path == "/api/ptz":

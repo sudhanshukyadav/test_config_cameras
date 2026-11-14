@@ -272,8 +272,10 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
         <label class="muted">T <input id="absY" type="number" min="-1" max="1" step="0.05" value="0" style="width:62px"></label>
         <label class="muted">Z <input id="absZ" type="number" min="0" max="1" step="0.05" placeholder="keep" style="width:62px"></label>
         <button id="btnAbsGo">Go</button>
+        <button id="btnAbsHere" title="Copy the camera's current position into the boxes">&#8681; here</button>
       </div>
       <div class="row" style="margin-top:6px">
+        <button id="btnAccept" class="primary" title="PTZ acceptance test: the camera must report its position, go to pan +10 and tilt +5 degrees from where it is and come back (within 1 degree). Passed: its POIs are reached by pan / tilt / zoom, no presets. The result is kept in the camera file (Save to camera and edge). About 20 s; the camera moves.">PTZ acceptance test</button>
         <button id="btnAbsTest" title="For cameras that report no position or store no presets: does the camera go to an absolute position (pan -0.5, +0.5, -0.5 again) and come back to the same view? About 25 s; the camera moves.">Absolute move test</button>
         <span class="muted" id="absVerdict"></span>
       </div>
@@ -493,7 +495,7 @@ function setCurrent(c) {
   loadList();
   EDGE.key = ""; edgeCheck();
   lockHold();
-  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); camTime("read"); }
+  if (camNow()?.host && PAGE === 2) { refreshSnap(); osdCall("read"); camFlip("read", "v"); camFlip("read", "h"); camTime("read"); acceptShow(); }
 }
 
 // ---- camera ID = site_camera: the OSD title and the file name (site_camera.json)
@@ -602,7 +604,10 @@ function buildForm(json) {
       const lg = document.createElement("fieldset"); lg.dataset.section = "login"; lg.className = "loginpanel";
       lg.innerHTML = `<legend>${esc(PANEL_NAMES.login)}</legend>`;
       const lgrid = document.createElement("div"); lgrid.className = "grid"; lg.appendChild(lgrid);
-      for (const [k, v] of Object.entries(obj)) (LOGIN_KEYS.includes(k) ? lgrid : grid).appendChild(fieldFor(sec, k, v));
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === "ptz_test") continue;     // the acceptance test's result: shown on the PTZ page, kept in the file
+        (LOGIN_KEYS.includes(k) ? lgrid : grid).appendChild(fieldFor(sec, k, v));
+      }
       const idb = document.createElement("div"); idb.className = "field wide idrow";
       idb.innerHTML = `<button type="button" id="btnIdentify" class="primary" title="Find what the camera is and a working login: without a password the default logins are tried first (at most 3); the password is asked only when none works">Identify</button>`;
       lgrid.appendChild(idb);
@@ -993,8 +998,55 @@ async function ptz(action, extra = {}) {
   } catch (e) { sbIssue(`PTZ ${action}: ${e.message}`); }
 }
 
+// POIs by pan / tilt / zoom: cameras that passed the PTZ acceptance test (camera.ptz_test.passed)
+const ptzByPosition = () => !!(current && current.json.camera && current.json.camera.ptz_test && current.json.camera.ptz_test.passed);
+function acceptShow() {
+  const t = current && current.json.camera && current.json.camera.ptz_test;
+  $("absVerdict").innerHTML = t ? `<span style="color:${t.passed ? "#1a7f37" : "#b62324"};font-weight:600">${esc(t.passed ? "PTZ test passed" : "PTZ test failed")}</span> <span class="muted">${esc((t.at || "").replace("T", " "))}</span>` : "";
+}
+$("btnAccept").onclick = async () => {
+  if (!current) return toast("Load a camera first");
+  const b = $("btnAccept"); b.disabled = true;
+  sbStep("PTZ acceptance test: the camera moves (pan +10, tilt +5, back)…");
+  try {
+    const d = await api("/api/ptz/accept_test", { camera: readForm().camera });
+    (d.steps || []).forEach(x => sbStep(`PTZ acceptance test: ${x}`));
+    (d.ok ? sbStep : sbIssue)(`PTZ acceptance test: ${d.verdict}`);
+    if (d.result) { (current.json.camera ||= {}).ptz_test = d.result;
+      sbStep("PTZ acceptance test: result kept in the camera; Save to camera and edge writes it to the files"); }
+    acceptShow(); renderMarkers(); ptz("status"); refreshSnap();
+  } catch (e) { sbIssue(`PTZ acceptance test: ${e.message}`); }
+  b.disabled = false;
+};
+// Dahua cameras take the typed position in degrees (PositionABS), as their position is shown above;
+// ONVIF cameras in the generic range (pan / tilt -1..1, zoom 0..1)
+const absDahua = () => { const c = camNow() || {}; return /dahua/.test(String(c.ptz_protocol || "")) || c.vendor === "dahua"; };
+function absMode() {
+  const d = absDahua();
+  [["absX", d ? [0, 360, 1] : [-1, 1, 0.05]], ["absY", d ? [-90, 90, 1] : [-1, 1, 0.05]], ["absZ", d ? [0, 9999, 1] : [0, 1, 0.05]]]
+    .forEach(([id, [mn, mx, st]]) => Object.assign($(id), { min: mn, max: mx, step: st }));
+  $("absX").closest(".row").title = d
+    ? "Send the camera to a position you type, in its own values as shown above: pan 0-360 and tilt in degrees, zoom in the camera's units. Empty zoom = keep the zoom. \u21e9 here copies the current position."
+    : "Send the camera to a position you type (ONVIF): pan and tilt from -1 to 1, zoom from 0 to 1. Empty zoom = keep the zoom.";
+}
+["absX", "absY", "absZ"].forEach(id => $(id).addEventListener("focus", absMode));
+$("btnAbsHere").onclick = async () => {
+  absMode();
+  const d = await ptz("status"); const p = d && d.status; if (!p) return;
+  $("absX").value = p.x; $("absY").value = p.y; if (absDahua()) $("absZ").value = p.z;
+};
 $("btnAbsGo").onclick = async () => {
+  absMode();
   const x = Number($("absX").value), y = Number($("absY").value), zs = $("absZ").value.trim();
+  if (absDahua()) {
+    if (!(x >= 0 && x <= 360 && y >= -90 && y <= 90) || (zs !== "" && !(Number(zs) >= 0))) {
+      sbIssue("Go to: pan 0 to 360, tilt -90 to 90 (degrees), zoom a positive number or empty"); return; }
+    sbStep(`PTZ go to pan ${x} tilt ${y}${zs === "" ? "" : " zoom " + zs}: moving…`);
+    const d = await ptz("absolute", { pos: { x, y, z: zs === "" ? null : Number(zs) } });
+    if (d && d.ok && d.status) sbStep(`PTZ go to: reached pan ${d.status.x} tilt ${d.status.y} zoom ${d.status.z} (${d.note || ""})`);
+    else if (d) sbIssue(`PTZ go to: ${d.note || d.error || "refused"}`);
+    refreshSnap(); return;
+  }
   if (!(x >= -1 && x <= 1 && y >= -1 && y <= 1) || (zs !== "" && !(Number(zs) >= 0 && Number(zs) <= 1))) {
     sbIssue("Go to: pan and tilt from -1 to 1, zoom from 0 to 1"); return; }
   const d = await ptz("absolute", { pos: { x, y, z: zs === "" ? null : Number(zs) } });
@@ -1089,7 +1141,11 @@ function renderMarkers() {
     row.querySelector(".nm").onchange = (e) => { const x = markersNow(), v = x[k];
       x[k] = v && typeof v === "object" ? { ...v, name: e.target.value.trim() } : { name: e.target.value.trim() }; setMarkers(x); };
     row.querySelector('[data-a="go"]').onclick = async () => { sbStep(`moving to ${k} ${poiName(m[k])}…`);
-      const d = await ptz("goto", { preset: Number(k), token: poiToken(m[k]) }); if (d && d.ok) { ptz("status"); refreshSnap(); } };
+      const v = m[k], byPos = ptzByPosition() && v && typeof v === "object" && v.pan != null;
+      const d = await ptz("goto", byPos ? { preset: Number(k), pos: { x: v.pan, y: v.tilt, z: v.zoom } }
+                                        : { preset: Number(k), token: poiToken(m[k]) });
+      if (d && d.ok) { if (byPos && d.status) sbStep(`${k} ${poiName(v)}: reached pan ${d.status.x} tilt ${d.status.y} zoom ${d.status.z} (${d.note || ""})`);
+        ptz("status"); refreshSnap(); } };
     row.querySelector('[data-a="here"]').onclick = async () => {
       const d = await ptz("set_preset", { preset: Number(k), token: poiToken(m[k]) }); if (!d || !d.ok) return;
       const st = await positionNow(), x = markersNow(); x[k] = poiAt(poiName(x[k]), st, d.token && d.token !== String(Number(k)) ? d.token : null); setMarkers(x);

@@ -38,6 +38,7 @@ Defaults = what the tool writes into a new JSON.
 | `flip_stream` | `false` | flip (done by the edge): only if the camera cannot flip its picture itself. Use sparingly; never together with the camera's own Flip |
 | `ptz_markers` | `{}` | points of interest: number, name and PTZ position (set them on the view page) |
 | `ptz_home` | POI 01 if there is one, else 0 | home POI: after a power / cable failure the edge sends the camera back there (0 = none; house button on the view page) |
+| `ptz_test` | - | PTZ acceptance test result (camera tool, PTZ page): `passed`, `at`, `verdict`, `abs_scale`. Passed = POIs are reached by their pan / tilt / zoom (no presets), on the camera tool and the edge |
 | `main_stream_path` | - | RTSP path of the recorded stream, e.g. /live/ch0 |
 | `sub_stream_path` | - | RTSP path used for motion detection |
 | `main_rtsp_url` | - | full RTSP URL; overrides the path |
